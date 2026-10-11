@@ -199,7 +199,10 @@ the engine's own `STRATA_DBG_NAN` probe plus per-layer residual ladders:
 
 With both knobs: *"Paris. The capital of Germany is Berlin. The capital…"*
 from `The capital of France is` — the first faithful output from the Strata
-engine on this hardware (~4 tok/s, one token per round). Remaining: output
-degrades to the constant token after ~11 positions (NaN onset at position 15,
-suspiciously near the QSA 16-cell block boundary or an adaptive-tier swap);
-the T≥2 graph parameter-passing root cause.
+engine on this hardware (~4 tok/s, one token per round). With
+`--adapt-swaps 0` added: *"Paris. The capital of Germany is Berlin. The
+capital of Italy"* (13 tokens). Remaining: the NaN onset window drifts with
+prompt length (4/13/15 for prompts of 4/7/13 tokens — roughly 12 verify
+windows in, NOT a fixed cell boundary; `--adapt-swaps 0` only delays it by
+one token, ruling the adaptive tier out as the sole trigger). The T≥2 graph
+parameter-passing root cause and the ~12-window lifetime remain open.

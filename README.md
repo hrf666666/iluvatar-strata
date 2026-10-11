@@ -118,7 +118,7 @@ CUDA_VISIBLE_DEVICES=3 STRATA_PREFILL_MMQ=0 STRATA_VERIFY_T1=1 ./build-iluvatar/
 
 - `STRATA_PREFILL_MMQ=0`:prefill 的 MMQ 量化矩阵乘路径(IQ2_S/Q2_0)在 bi 上产生非有限值——引擎自带的 `STRATA_DBG_NAN` 探针定位到 layer 0 即坏;关闭后走 FP16 路径,prompt 末端残差 0 个非有限值。
 - `STRATA_VERIFY_T1=1`:verify 窗口只有 T=1 的 CUDA 图在回放时数值正确;多 token 图(T≥2)输出全 NaN(首 token 真、后续 NaN 的双态行为是这条线索的来源)。T=1 钉死每个窗口后引擎持续产出忠实 token(~4 tok/s)。
-- 遗留:约 11 个 token 后输出退化(位置 15 起 NaN,疑似 QSA 块边界/自适应专家换入状态),多 token verify 图的根因(图回放参数传递)是下一个目标。Flash-Next 的全速忠实推理仍建议用上方 llama.cpp 路径。
+- 遗留:约 11–13 个 token 后输出退化(NaN 起始窗口随提示长度漂移;`--adapt-swaps 0` 可再多一个 token,排除自适应换入是唯一诱因),多 token verify 图的根因(图回放参数传递)是下一个目标。Flash-Next 的全速忠实推理仍建议用上方 llama.cpp 路径。
 
 ## 相关项目(Qwen3.8-27B 生态,按星数)
 
