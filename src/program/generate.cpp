@@ -2737,7 +2737,7 @@ int main(int argc, char** argv) {
     strata::core::layer_set_publish_kernel(!o.no_publish_kernel);
     strata::core::layer_set_fused_gdn(!o.no_fused_gdn);
     strata::core::layer_set_fast_select(!o.no_fast_select);
-    strata::core::layer_set_fused_gr(o.gr_native_mmvf && !o.no_fused_gr && !o.gpu_stages && o.dump_layers.empty() &&
+    strata::core::layer_set_fused_gr((getenv("STRATA_DBG_ALLOW_DUMP") || o.dump_layers.empty()) && o.gr_native_mmvf && !o.no_fused_gr && !o.gpu_stages &&
                                      o.dump_halves.empty() && !o.stage_timing);
     strata::core::layer_set_native_bf16(o.native_bf16);
     strata::core::layer_set_native_flash_attn_short(o.native_flash_attn_short);
@@ -11189,6 +11189,14 @@ int main(int argc, char** argv) {
                 return 1;
             }
             prefill.on_chunk = [&](const float* R_rows, int64_t T, int64_t p0, std::string& e) -> bool {
+                if (getenv("STRATA_DBG_R")) {
+                    std::vector<float> rr((size_t) T * g.hc * g.n_embd);
+                    cudaMemcpy(rr.data(), R_rows, rr.size() * 4, cudaMemcpyDeviceToHost);
+                    double mx = 0; int64_t nz = 0;
+                    for (float v : rr) { if (v != 0.0f) ++nz; mx = std::max(mx, (double) std::fabs(v)); }
+                    std::fprintf(stderr, "ivx-dbg: prefill on_chunk p0=%lld T=%lld: R nonzero=%lld/%zu maxabs=%g\n",
+                                 (long long) p0, (long long) T, (long long) nz, rr.size(), mx);
+                }
                 // cell i pairs R_i with the token at i + 1 (every such token is in the prompt)
                 std::vector<int32_t> nxt((size_t) T);
                 for (int64_t t = 0; t < T; ++t) nxt[(size_t) t] = (int32_t) o.tokens[(size_t) (p0 + t + 1)];
@@ -11234,6 +11242,24 @@ int main(int argc, char** argv) {
         prefill_batched_ms = std::chrono::duration<double, std::milli>(Clock::now() - tp0).count();
         prefill_ms += prefill_batched_ms;
         pos_start = n_batched;
+        if (getenv("STRATA_DBG_R")) {
+            std::vector<float> r(g.hc * g.n_embd);
+            (void) cudaStreamSynchronize((cudaStream_t) main_cs);
+            cudaMemcpy(r.data(), ss.R, r.size() * 4, cudaMemcpyDeviceToHost);
+            double mx = 0, sum = 0; int64_t nz = 0;
+            for (float v : r) { if (v != 0.0f) ++nz; sum += (double) v; mx = std::max(mx, (double) std::fabs(v)); }
+            std::fprintf(stderr, "ivx-dbg: R after PREFILL: nonzero=%lld/%zu maxabs=%g sum=%g\n",
+                         (long long) nz, r.size(), mx, sum);
+            {   // GDN recurrence state the verify window's layer 0 reads
+                const int64_t gf = (int64_t) (g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size + g.ssm_conv_channels * (g.ssm_d_conv - 1));
+                std::vector<float> gs((size_t) ss.gdn_alloc * gf);
+                cudaMemcpy(gs.data(), ss.gdn_state, gs.size() * 4, cudaMemcpyDeviceToHost);
+                int64_t nnan = 0, nzero = 0; double gmx = 0;
+                for (float v : gs) { if (v != v || !std::isfinite(v)) ++nnan; else { if (v == 0.0f) ++nzero; gmx = std::max(gmx, (double) std::fabs(v)); } }
+                std::fprintf(stderr, "ivx-dbg: GDN state after PREFILL: floats=%zu nonfinite=%lld zeros=%lld maxabs=%g\n",
+                             gs.size(), (long long) nnan, (long long) nzero, gmx);
+            }
+        }
         tok = o.tokens[(size_t) pos_start];
         // the PLE window of the token path: the two tokens before `pos_start`
         ss.ple_prev[0] = pos_start >= 2 ? (int32_t) o.tokens[(size_t) (pos_start - 2)] : -1;
@@ -11254,7 +11280,7 @@ int main(int argc, char** argv) {
     }
     for (int64_t pos = pos_start;; ++pos) {
         // plan v0.3 P6: a native pack's last prompt token is the first verify window (T = 1)
-        if (native_pack) { spec_pos = pos; break; }
+        if (native_pack && !getenv("STRATA_DBG_PLAIN")) { spec_pos = pos; break; }
         if (pos >= o.max_context) {
             std::fprintf(stderr, "strata generate: ran out of context at position %lld\n", (long long) pos);
             return 2;
@@ -11330,6 +11356,15 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata generate: session_loop: %s\n", err.c_str());
                 return 1;
             }
+        }
+        if (getenv("STRATA_DBG_R")) {
+            std::vector<float> r(g.hc * g.n_embd);
+            (void) cudaStreamSynchronize((cudaStream_t) main_cs);
+            cudaMemcpy(r.data(), ss.R, r.size() * 4, cudaMemcpyDeviceToHost);
+            double mx = 0, sum = 0; int64_t nz = 0;
+            for (float v : r) { if (v != 0.0f) ++nz; sum += (double) v; mx = std::max(mx, (double) std::fabs(v)); }
+            std::fprintf(stderr, "ivx-dbg: R after token pos=%lld: nonzero=%lld/%zu maxabs=%g sum=%g\n",
+                         (long long) pos, (long long) nz, r.size(), mx, sum);
         }
         if (final_r != nullptr) {
             cudaMemcpy(final_r_host.data(), ss.R, final_r_host.size() * sizeof(float), cudaMemcpyDeviceToHost);
@@ -11689,6 +11724,15 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
+        if (getenv("STRATA_DBG_R")) {
+            std::vector<float> r(g.hc * g.n_embd);
+            cudaStreamSynchronize((cudaStream_t) main_cs);
+            cudaMemcpy(r.data(), ss.R, r.size() * 4, cudaMemcpyDeviceToHost);
+            double mx = 0, sum = 0; int64_t nz = 0;
+            for (float v : r) { if (v != 0.0f) ++nz; sum += (double) v; mx = std::max(mx, (double) std::fabs(v)); }
+            std::fprintf(stderr, "ivx-dbg: R entering SPEC loop (pos=%lld tok=%lld): nonzero=%lld/%zu maxabs=%g sum=%g\n",
+                         (long long) spec_pos, (long long) tok, (long long) nz, r.size(), mx, sum);
+        }
         std::vector<int32_t> window((size_t) o.spec), outv((size_t) o.spec);
         std::vector<uint8_t> fdiff((size_t) o.spec, 0);
         std::FILE* hashes = o.window_hashes.empty() ? nullptr : std::fopen(o.window_hashes.c_str(), "w");
@@ -11728,6 +11772,9 @@ int main(int argc, char** argv) {
                 while (T < S_mtp && dprob[(size_t) T - 1] >= (float) o.spec_min_p) ++T;
             }
             if (first_window) T = 1;
+            // iluvatar port: only the T=1 verify graph computes correctly on BI-V150 (the multi-token
+            // graphs emit all-NaN logits). STRATA_VERIFY_T1=1 pins every window to one token.
+            if (getenv("STRATA_VERIFY_T1")) T = 1;
             bool from_sfx = false;
             int sfx_match = 0;
             if (o.suffix_draft > 0 && !first_window) {
@@ -11781,6 +11828,18 @@ int main(int argc, char** argv) {
             if (!ver.run(T, window.data(), p, &drive_pool_multi, &drive, outv.data(), err)) {
                 std::fprintf(stderr, "strata generate: %s\n", err.c_str());
                 return 1;
+            }
+            if (getenv("STRATA_DBG_R")) {
+                std::vector<float> row((size_t) ver.vocab());
+                if (ver.copy_logits(0, row.data())) {
+                    double mx = -1e300; int am = 0; int64_t nz = 0;
+                    for (size_t i = 0; i < row.size(); ++i) { if (row[i] != 0.0f) ++nz; if (row[i] > mx) { mx = row[i]; am = (int) i; } }
+                    std::fprintf(stderr, "ivx-dbg: verify logits[0] round=%lld: argmax=%d max=%g nonzero=%lld/%zu first5=%g %g %g %g %g\n",
+                                 (long long) rounds, am, mx, (long long) nz, row.size(),
+                                 row[0], row[1], row[2], row[3], row[4]);
+                } else {
+                    std::fprintf(stderr, "ivx-dbg: verify copy_logits failed\n");
+                }
             }
             if (drive.d.failed) {
                 std::fprintf(stderr, "strata generate: the expert pool failed at layer %lld expert %lld: %s\n",

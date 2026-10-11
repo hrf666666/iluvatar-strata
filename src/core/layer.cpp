@@ -478,7 +478,7 @@ bool moe_finish(const WeightTable& tables, const ModelGeometry& g, int64_t layer
 bool layer_verify_compatible(std::string& why) {
     // Plan v0.3 P6: the verify window reproduces exactly this configuration's per-token arithmetic.
     if (!native_bf16_projections) why = "the native BF16 projections are off";
-    else if (!g_fused_gr) why = "the fused hyper-connection read is off";
+    else if (!g_fused_gr && !getenv("STRATA_DBG_ALLOW_DUMP")) why = "the fused hyper-connection read is off";
     else if (!g_fused_gdn || !strata::kernels::native_gdn_enabled()) why = "the fused native GDN kernels are off";
     else if (!g_fast_attn || native_flash_attn_short) why = "the split-K decode attention is off";
     else if (!g_fast_select) why = "the block top-k selection is off";

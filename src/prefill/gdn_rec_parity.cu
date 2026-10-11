@@ -356,7 +356,8 @@ __global__ void __launch_bounds__(256) gdn_chunk_prep_kernel(const float* __rest
     gm[((int64_t) ch * HV + vh) * GCH + i] = gam;
 }
 
-__device__ __forceinline__ void gdn_pf_l2(const float* p) { asm volatile("prefetch.global.L2 [%0];" ::"l"(p)); }
+__device__ __forceinline__ void gdn_pf_l2(const float* p) { ((void) p); // iluvatar: prefetch.global.L2 asm rejected by bi
+}
 __device__ __forceinline__ void gdn_cp_wait_all() {
 #if STRATA_GDN_CP_ASYNC
     asm volatile("cp.async.wait_all;\n" ::);
@@ -668,12 +669,12 @@ __global__ void count_diff(const uint32_t* a, const uint32_t* b, int64_t n, unsi
 // ------------------------------------------------------------------ holding SMs (fewer_sms)
 __device__ __forceinline__ uint64_t gtime() {
     uint64_t t;
-    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+    t = 0ull;               // iluvatar: %%globaltimer asm rejected by bi (profiler-only value)
     return t;
 }
 __device__ __forceinline__ int sm_id() {
     unsigned id;
-    asm volatile("mov.u32 %0, %%smid;" : "=r"(id));
+    id = 0;                  // iluvatar: %%smid asm rejected by bi (timing bucket only)
     return (int) id;
 }
 __device__ __forceinline__ void nap(unsigned ns) {

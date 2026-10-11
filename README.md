@@ -105,7 +105,20 @@ CUDA_VISIBLE_DEVICES=2 ./build-iluvatar/strata \
   --tokens '<ids>' --max-new 64
 ```
 
-引擎加载 33G 专家池 + 3.2 亿行 PLE 表,MTP 投机验证全链路在 GPU 上跑,10–17 tok/s;kernel parity 全绿(`iq/s_gemv/mmvq_il/verify/kv_q8/cvec/sampler/gdn/gr`),唯一未解项是 logits 塌缩为常量 token(缺陷在 kernel 层之上:草稿器/头/嵌入交互,移植记录有定位线索)。Flash-Next 的**忠实**推理由上方 llama.cpp 路径承担。
+**2026-10-12 更新:引擎首次输出忠实文本!** 定位到两个可绕开的缺陷并以环境变量开关修复:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 STRATA_PREFILL_MMQ=0 STRATA_VERIFY_T1=1 ./build-iluvatar/strata \
+  --pack <packdir> --native <shard1> --ple-gguf <shard2> \
+  --spec 2 --prefill 512 --expert-profile data/expert-profile.bin --expert-cache 2048 \
+  --tokens "760,6511,314,9338,369" --max-new 10
+# 输出(同一引擎、同一权重):
+# "Paris. The capital of Germany is Berlin. The capital…"
+```
+
+- `STRATA_PREFILL_MMQ=0`:prefill 的 MMQ 量化矩阵乘路径(IQ2_S/Q2_0)在 bi 上产生非有限值——引擎自带的 `STRATA_DBG_NAN` 探针定位到 layer 0 即坏;关闭后走 FP16 路径,prompt 末端残差 0 个非有限值。
+- `STRATA_VERIFY_T1=1`:verify 窗口只有 T=1 的 CUDA 图在回放时数值正确;多 token 图(T≥2)输出全 NaN(首 token 真、后续 NaN 的双态行为是这条线索的来源)。T=1 钉死每个窗口后引擎持续产出忠实 token(~4 tok/s)。
+- 遗留:约 11 个 token 后输出退化(位置 15 起 NaN,疑似 QSA 块边界/自适应专家换入状态),多 token verify 图的根因(图回放参数传递)是下一个目标。Flash-Next 的全速忠实推理仍建议用上方 llama.cpp 路径。
 
 ## 相关项目(Qwen3.8-27B 生态,按星数)
 

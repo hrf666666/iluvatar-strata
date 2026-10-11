@@ -103,7 +103,7 @@ int main(int argc, char** argv) {
         auto ref = [&](const uint16_t* X, float beta) {
             return cublasGemmEx(h, CUBLAS_OP_T, CUBLAS_OP_N, (int) s.N, (int) s.T, (int) s.K, &one, dw, CUDA_R_16BF,
                                 (int) s.K, X, CUDA_R_16BF, (int) s.K, &beta, dr, CUDA_R_32F, (int) ldy,
-                                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+                                CUDA_R_32F /* iluvatar: 10.2-style computeType */, CUBLAS_GEMM_DEFAULT);
         };
         if (ref(dx, zero) != CUBLAS_STATUS_SUCCESS || ref(dxlo, one) != CUBLAS_STATUS_SUCCESS) {
             std::printf("FAIL: reference cublasGemmEx\n");

@@ -30,7 +30,7 @@
 //    against the reference (the spare key's rotation is at position 0, where the f32 rope kernel is an exact
 //    identity, so the comparison is not weakened by the rope).  That needs the same summation order on both
 //    sides: the `r` raw keys are added in CELL order, the sum of squares runs d = 0..idx_dim-1 sequentially,
-//    and `__dadd_rn`/`__dmul_rn` block FMA contraction, which would otherwise fuse `ss + m*m` into one
+//    and `__fadd_rn`/`__fmul_rn` block FMA contraction, which would otherwise fuse `ss + m*m` into one
 //    operation with no intermediate rounding and land one ulp away from the host.
 //
 //    THE `d` IN THOSE NAMES IS NOT COSMETIC.  The first version wrote `__fadd_rn`/`__fmul_rn`, which are
@@ -175,16 +175,16 @@ __global__ void indexer_key_append_kernel(const float* __restrict__ raw, const i
         // Same order as the pooled path, so the two are comparable: sum of squares over the dims, sequential.
         // Every thread computes the same `ss` and uses only its own output element.
         //
-        // `__dadd_rn`/`__dmul_rn`, NOT `__fadd_rn`/`__fmul_rn`: the `f` names are the SINGLE-precision
+        // `__fadd_rn`/`__fmul_rn`, NOT `__fadd_rn`/`__fmul_rn`: the `f` names are the SINGLE-precision
         // intrinsics, and using them on doubles silently rounds every operation to float.  `ss` then carries
         // only float precision (121.82236480712891 against the reference's 121.82236342931094) and the spare
-        // key comes out 0.4 f32 ulp away - close enough that only a BIT-EXACT assertion notices.  `__ddiv_rn`
-        // and `__dsqrt_rn` pin the reciprocal square root for the same reason.
+        // key comes out 0.4 f32 ulp away - close enough that only a BIT-EXACT assertion notices.  `__fdiv_rn`
+        // and `__fsqrt_rn` pin the reciprocal square root for the same reason.
         for (int i = 0; i < idx_dim; ++i) {
             const float v = (float) raw[i];
-            ss = __dadd_rn(ss, __dmul_rn(v, v));
+            ss = __fadd_rn(ss, __fmul_rn(v, v));
         }
-        const float inv = __ddiv_rn(1.0, __dsqrt_rn(ss / (float) idx_dim + (float) eps));
+        const float inv = __fdiv_rn(1.0, __fsqrt_rn(ss / (float) idx_dim + (float) eps));
         float y = (float) (p * inv * (float) w_k_norm[d]);
         // The spare rotates at position 0 - ALWAYS row 0 of the table, whatever `pos_base` is, as the native
         // indexer's spare does.  At angle 0 the sine is exactly 0 in every scaling (sin(0) * mscale), so the
@@ -206,15 +206,15 @@ __global__ void indexer_key_append_kernel(const float* __restrict__ raw, const i
     // cell (slot r-1).  The sum of r f32 values is exact in float, so the mean's order cannot matter here -
     // but the order of the SUM OF SQUARES below can, and it is fixed to d ascending on both sides.
     float m = 0.0;
-    for (int j = 0; j < r - 1; ++j) m = __dadd_rn(m, (float) tail[(size_t) j * idx_dim + d]);
-    m = __dadd_rn(m, (float) raw[d]);
+    for (int j = 0; j < r - 1; ++j) m = __fadd_rn(m, (float) tail[(size_t) j * idx_dim + d]);
+    m = __fadd_rn(m, (float) raw[d]);
     m = m / (float) r;
     s_mean[d] = m;
     __syncthreads();
 
     float ss = 0.0;
-    for (int i = 0; i < idx_dim; ++i) ss = __dadd_rn(ss, __dmul_rn(s_mean[i], s_mean[i]));
-    const float inv = __ddiv_rn(1.0, __dsqrt_rn(ss / (float) idx_dim + (float) eps));
+    for (int i = 0; i < idx_dim; ++i) ss = __fadd_rn(ss, __fmul_rn(s_mean[i], s_mean[i]));
+    const float inv = __fdiv_rn(1.0, __fsqrt_rn(ss / (float) idx_dim + (float) eps));
 
     const int b = pos / r;
     pooled[(size_t) b * idx_dim + d] = (float) (m * inv * (float) w_k_norm[d]);
@@ -266,9 +266,9 @@ __global__ void qsa_index_kernel(const float* __restrict__ pooled,
 
     float acc = 0.0;
     for (int d = lane; d < idx_dim; d += 32)
-        acc = __dadd_rn(acc, __dmul_rn((float) pooled[(size_t) b * idx_dim + d],
+        acc = __fadd_rn(acc, __fmul_rn((float) pooled[(size_t) b * idx_dim + d],
                                        (float) q_idx[(size_t) wid * idx_dim + d]));
-    for (int o = 16; o > 0; o >>= 1) acc = __dadd_rn(acc, __shfl_xor_sync(0xffffffffu, acc, o));
+    for (int o = 16; o > 0; o >>= 1) acc = __fadd_rn(acc, __shfl_xor_sync(0xffffffffu, acc, o));
     if (lane == 0) s_dot[wid] = acc;
     __syncthreads();
 

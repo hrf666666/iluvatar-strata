@@ -451,8 +451,10 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         return false;
     }
     if (le_ < 0) le_ = g.n_layers;
-    if (lb_ < 0 || lb_ >= le_ || le_ > g.n_layers || (lb_ > 0 && hand_in_ == nullptr) ||
-        (le_ < g.n_layers && hand_out_ == nullptr)) {
+    if (const char* dv = getenv("STRATA_DBG_LE")) { le_ = std::min<int64_t>(le_, (int64_t) atoll(dv)); }
+    const bool dbg_trunc = getenv("STRATA_DBG_LE") != nullptr;
+    if (lb_ < 0 || lb_ >= le_ || le_ > g.n_layers || (lb_ > 0 && !dbg_trunc && hand_in_ == nullptr) ||
+        (le_ < g.n_layers && !dbg_trunc && hand_out_ == nullptr)) {
         err = "verify: the stage's layer range or its hand-off buffers are wrong";
         return false;
     }
@@ -1519,10 +1521,32 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
 
     for (int grp = 0; grp < G; ++grp)
         if (!pre(lb_, grp)) return false;
+    if (getenv("STRATA_DBG_R")) {
+        cudaStreamSynchronize(cs);
+        std::vector<float> rr((size_t) T * HC * N);
+        cudaMemcpy(rr.data(), R_, rr.size() * 4, cudaMemcpyDeviceToHost);
+        for (int t = 0; t < T; ++t) {
+            int64_t nnan = 0; double mx = 0;
+            for (int i = 0; i < HC * N; ++i) { float v = rr[(size_t) t * HC * N + i]; if (v != v || !std::isfinite(v)) ++nnan; else mx = std::max(mx, (double) std::fabs(v)); }
+            std::fprintf(stderr, "ivx-dbg: verify BEFORE layers: token[%d] nonfinite=%lld/%d maxabs=%g\n",
+                         t, (long long) nnan, HC * N, mx);
+        }
+    }
     for (int64_t l = lb_; l < le_; ++l)
         for (int grp = 0; grp < G; ++grp) {
             if (!post(l, grp)) return false;
             if (l + 1 < le_ && !pre(l + 1, grp)) return false;
+            if (getenv("STRATA_DBG_R")) {
+                cudaStreamSynchronize(cs);
+                std::vector<float> rr((size_t) T * HC * N);
+                cudaMemcpy(rr.data(), R_, rr.size() * 4, cudaMemcpyDeviceToHost);
+                int64_t nnan = 0; double mx = 0;
+                for (float v : rr) { if (v != v || !std::isfinite(v)) ++nnan; else mx = std::max(mx, (double) std::fabs(v)); }
+                if (nnan > 0 || getenv("STRATA_DBG_R2"))
+                    std::fprintf(stderr, "ivx-dbg: verify layer %lld done: nonfinite=%lld/%zu maxabs=%g\n",
+                                 (long long) l, (long long) nnan, rr.size(), mx);
+                if (nnan > 0) { err = "ivx: NaN after layer " + std::to_string(l); return false; }
+            }
         }
     if (le_ < g.n_layers) {   // a layer split's earlier stage: hand the residual on, no head
         float* hout = hand_out_ + (size_t) hrow0 * HB;
@@ -1940,6 +1964,15 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     const cudaError_t le = cudaGraphLaunch(ar_off_ ? exec_nr_[T] : exec_[T], cs_);
     trace_ev("LAUNCHED", -1, -1, (int64_t) le);
     if (le != cudaSuccess) { err = std::string("verify: launch: ") + cudaGetErrorString(le); return false; }
+    if (getenv("STRATA_DBG_DUMP_R")) {
+            cudaStreamSynchronize(cs_);
+            std::vector<float> rr((size_t) T * g.hc * g.n_embd);
+            cudaMemcpy(rr.data(), R_, rr.size() * 4, cudaMemcpyDeviceToHost);
+            int64_t nnan = 0; double mx = 0;
+            for (float v : rr) { if (v != v || !std::isfinite(v)) ++nnan; else mx = std::max(mx, (double) std::fabs(v)); }
+            std::fprintf(stderr, "ivx-dbg: AFTER replay T=%lld pos=%lld le=%lld: R nonfinite=%lld/%zu maxabs=%g\n",
+                         (long long) T, (long long) pos0, (long long) le_, (long long) nnan, rr.size(), mx);
+        }
     (void) cudaStreamQuery(cs_);
     VDBG("launched\n");
     volatile uint32_t* const seq = h_seq_;

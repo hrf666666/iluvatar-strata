@@ -2392,6 +2392,16 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                              (long long) p0, (long long) layer, what, ms, cudaGetErrorString(a), cudaGetErrorString(b));
         };
         for (int64_t l = LB; l < LE; ++l) {
+            if (getenv("STRATA_DBG_R")) {
+                cudaStreamSynchronize(m.cs);
+                std::vector<float> pr((size_t) T * g.hc * g.n_embd);
+                cudaMemcpy(pr.data(), m.R, pr.size() * 4, cudaMemcpyDeviceToHost);
+                int64_t nnan = 0; double mx = 0;
+                for (float v : pr) { if (v != v || !std::isfinite(v)) ++nnan; else mx = std::max(mx, (double) std::fabs(v)); }
+                if (nnan > 0 || getenv("STRATA_DBG_R2"))
+                    std::fprintf(stderr, "ivx-dbg: prefill ENTER layer %lld: R nonfinite=%lld/%zu maxabs=%g\n",
+                                 (long long) l, (long long) nnan, pr.size(), mx);
+            }
             core::progress_beat();   // the serve watchdog: a prompt chunk of 8192 tokens is still moving
             if (l > LB) pf_step("reading the prompt (batched, step sync): the experts and the rest of layer", l - 1);
             core::progress_at("reading the prompt (batched): layer", l, p0);   // #251: a stall names layer and chunk
@@ -3878,6 +3888,19 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 } else {
                     gr_write(m.R, m.bo, m.inj, HC, T, m.cs);
                 }
+                if (getenv("STRATA_DBG_R")) {
+                    cudaStreamSynchronize(m.cs);
+                    auto stat = [&](const char* what, const void* p, int64_t floats) {
+                        if (p == nullptr || floats <= 0) { std::fprintf(stderr, "ivx-dbg: L%lld %s: null/empty\n", (long long) l, what); return; }
+                        std::vector<float> h((size_t) floats);
+                        cudaMemcpy(h.data(), p, (size_t) floats * 4, cudaMemcpyDeviceToHost);
+                        int64_t nnan = 0; double mx = 0;
+                        for (float v : h) { if (v != v || !std::isfinite(v)) ++nnan; else mx = std::max(mx, (double) std::fabs(v)); }
+                        std::fprintf(stderr, "ivx-dbg: L%lld %s: nonfinite=%lld/%lld maxabs=%g\n", (long long) l, what, (long long) nnan, (long long) floats, mx);
+                    };
+                    stat("bo(block-out)", m.bo, T * N);
+                    stat("inj", m.inj, T * HC);
+                }
                 if (steered && !cv_fused)   // --control-vector-scaled
                     strata::kernels::cvec_apply(m.R, l, T, D, nullptr, 0, nullptr, 0, false, m.cs);
             }
@@ -3947,6 +3970,15 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 }
                 std::fclose(f);
             }
+        }
+        if (getenv("STRATA_DBG_R")) {
+            cudaStreamSynchronize(m.cs);
+            std::vector<float> pr((size_t) T * g.hc * g.n_embd);
+            cudaMemcpy(pr.data(), m.R, pr.size() * 4, cudaMemcpyDeviceToHost);
+            int64_t nnan = 0; double mx = 0;
+            for (float v : pr) { if (v != v || !std::isfinite(v)) ++nnan; else mx = std::max(mx, (double) std::fabs(v)); }
+            std::fprintf(stderr, "ivx-dbg: prefill chunk p0=%lld T=%lld: R nonfinite=%lld/%zu maxabs=%g\n",
+                         (long long) p0, (long long) T, (long long) nnan, pr.size(), mx);
         }
         if (on_chunk || on_stage_chunk) {
             const auto toc = Clock::now();

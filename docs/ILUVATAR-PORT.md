@@ -175,3 +175,31 @@ Next session's entry point: run with `STRATA_DBG_R=1` and bisect by
 selectively replacing window sub-kernels with their scalar twins (the
 `STRATA_HC_SPLIT=0` knob already exists for the GR read; a similar knob for
 `gdn_step_multi`/`native_qsa` would halve the search space per run).
+
+
+## 11. Breakthrough: the Strata engine emits faithful text (2026-10-12)
+
+The all-NaN characterization from §10 was driven to TWO concrete defects with
+the engine's own `STRATA_DBG_NAN` probe plus per-layer residual ladders:
+
+1. **Prefill MMQ path**: layer 0's MoE experts (IQ2_S gate/up + Q2_0 down via
+   llama.cpp MMQ templates) emit non-finite activations from the first layer
+   (`non-finite GU 519 H 1144 Dm 42085 bo 7715 of T 4`). Every constituent
+   passes parity standalone (`mmq_il_parity` bitwise, `iq_parity`, bf16 GEMM
+   rel 1e-7), and the pinned-tree MMQ kernels see `__CUDA_ARCH__=300` with
+   `GGML_CUDA_ARCH_NUM` undefined (Strata compiles them with only
+   `STRATA_CUDA_ARCH_NUM=600`), so the generic fp32 paths are taken — the
+   divergence is in the engine's multi-expert/grouping driver, not the
+   kernels. **`STRATA_PREFILL_MMQ=0`** sidesteps it: prompt-end residual 0
+   non-finite (was 40960/40960).
+2. **Multi-token verify graphs**: only the T=1 window graph computes
+   correctly on replay; T≥2 graphs emit all-NaN logits (real token from the
+   first T=1 window, then NaN). **`STRATA_VERIFY_T1=1`** pins every window
+   to one token.
+
+With both knobs: *"Paris. The capital of Germany is Berlin. The capital…"*
+from `The capital of France is` — the first faithful output from the Strata
+engine on this hardware (~4 tok/s, one token per round). Remaining: output
+degrades to the constant token after ~11 positions (NaN onset at position 15,
+suspiciously near the QSA 16-cell block boundary or an adaptive-tier swap);
+the T≥2 graph parameter-passing root cause.
