@@ -206,3 +206,22 @@ prompt length (4/13/15 for prompts of 4/7/13 tokens — roughly 12 verify
 windows in, NOT a fixed cell boundary; `--adapt-swaps 0` only delays it by
 one token, ruling the adaptive tier out as the sole trigger). The T≥2 graph
 parameter-passing root cause and the ~12-window lifetime remain open.
+
+
+## 12. T=2 graph facts (same session, follow-up)
+
+* The T≥2 window graph is NaN **from its very first replay** (deterministic:
+  first window T=1 real, first T=2 window all-NaN) — not a lifetime issue.
+* Node composition (`STRATA_VERIFY_NODES=1`): T=1 = 2077 nodes (2076 kernel +
+  1 memcpy), T=2 = 2096 nodes (2096 kernel, 0 memcpy). Only ~19 nodes apart —
+  not a driver node-count limit; `cudaFuncGetName` needs CUDART ≥ 12.3 so
+  kernel names are unavailable on this 10.2 runtime.
+* `--adapt-swaps 0` extends the T=1-only run from 11 to 13 faithful tokens
+  (*"Paris. The capital of Germany is Berlin. The capital of Italy"*), so the
+  adaptive tier contributes to the T=1 lifetime but is not the sole trigger.
+* The remaining suspects for T≥2 are the multi-token kernels inside the
+  captured graph (gdn multi / qsa decode multi / 2-row grouped experts /
+  2-column head) — all parity-green OUTSIDE graphs — or their parameter
+  capture. Next lever: capture-free window execution (needs a driver without
+  the doorbell-in-graph constraint) or per-node parameter comparison between
+  capture and replay.
