@@ -143,3 +143,35 @@ spare-slot rms_norm (128/128) which may be the same root cause.
 * llama.cpp on the same card runs the 27B Q4_K_M at ~11 tok/s decode /
   ~35 tok/s prompt with full offload, and supports `qwen4exp` (Flash-Next
   GGUFs) natively for cross-checking.
+
+## 10. Flash-Next Strata-engine defect: precise characterization (2026-10-11 night session)
+
+The engine's constant-token output was driven down to its mechanism:
+
+* **The verify-window graph replay produces all-NaN logits.** Hooked
+  `Verifier::run` post-replay: every one of 248320 logits is NaN for every
+  round → argmax 0 → the constant token. (Debug hooks live in the tree,
+  env-gated: `STRATA_DBG_R` prints residual/logits stats, `STRATA_DBG_DUMP_R`
+  dumps R after replay, `STRATA_DBG_LE` truncates the verify layer range,
+  `STRATA_DBG_PLAIN` routes the last prompt token through the plain loop,
+  `STRATA_DBG_ALLOW_DUMP` relaxes the fused-GR/dump exclusivity.)
+* **R is exactly zero entering generation** — prefill for native packs never
+  writes `ss.R` by design (the verify window embeds its own tokens); ruled
+  out as a defect.
+* **Ruled out by microtest**: mapped-host-memory kernel read/write
+  (`cudaHostAllocMapped`, both directions, bit-exact); per-kernel parity for
+  every family the window runs (gdn/qsa/gr/indexer/sampler/mmvf/experts all
+  0-fail); graph lifecycle (the window graph is captured once per T and
+  instantiated — no per-round `cudaGraphExecUpdate`, so the CoreX update bug
+  documented for llama.cpp cannot apply).
+* **Capture-time probes are inert** (capture records without executing), and
+  truncating the window's layer range (`STRATA_DBG_LE`) stalls the replay —
+  the doorbell/pool machinery outside the truncated graph never completes —
+  so layer-level bisection of the live NaN needs device-side single-step,
+  which CoreX does not expose. The NaN originates at or after layer 0 of the
+  first replayed window.
+
+Next session's entry point: run with `STRATA_DBG_R=1` and bisect by
+selectively replacing window sub-kernels with their scalar twins (the
+`STRATA_HC_SPLIT=0` knob already exists for the GR read; a similar knob for
+`gdn_step_multi`/`native_qsa` would halve the search space per run).
