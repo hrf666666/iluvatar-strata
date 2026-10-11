@@ -1,0 +1,1310 @@
+Only in /root/llama-deploy/llama.cpp: .ivcore_patched
+Only in /root/llama-deploy/llama.cpp: conv2d.o
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/CMakeLists.txt /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/CMakeLists.txt
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/CMakeLists.txt	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/CMakeLists.txt	2026-10-10 19:04:20.940921176 +0800
+@@ -115,10 +115,12 @@
+     list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda.h")
+ 
+     file(GLOB   GGML_SOURCES_CUDA "*.cu")
++    if (GGML_CUDA_FA) # iluvatar port: FA tile/mma instance kernels crash bi llc asm printer
+     file(GLOB   SRCS "template-instances/fattn-tile*.cu")
+     list(APPEND GGML_SOURCES_CUDA ${SRCS})
+     file(GLOB   SRCS "template-instances/fattn-mma*.cu")
+     list(APPEND GGML_SOURCES_CUDA ${SRCS})
++    endif ()
+     file(GLOB   SRCS "template-instances/mmq*.cu")
+     list(APPEND GGML_SOURCES_CUDA ${SRCS})
+     file(GLOB   SRCS "template-instances/mmf*.cu")
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/allreduce.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/allreduce.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/allreduce.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/allreduce.cu	2026-10-10 17:01:36.651177720 +0800
+@@ -1,6 +1,6 @@
+ #include "allreduce.cuh"
+ 
+-#if !defined(GGML_USE_MUSA)
++#if 0 // iluvatar port: use fallback branch below
+ 
+ #include "convert.cuh"
+ #include "ggml-impl.h"
+@@ -165,7 +165,7 @@
+ #ifdef GGML_USE_HIP
+             // Equals ~100ns at 2500 MHz (sleeps for n * [1,64] clock cycles)
+             __builtin_amdgcn_s_sleep(4);
+-#elif __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA
++#elif GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_VOLTA
+             __nanosleep(100);
+ #else
+             NO_DEVICE_CODE;
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/binbcast.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/binbcast.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/binbcast.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/binbcast.cu	2026-10-11 07:24:40.653071475 +0800
+@@ -315,7 +315,12 @@
+         const uint3 ne12 = init_fastdiv_values((uint32_t) cne1[2]);
+         const uint3 ne13 = init_fastdiv_values((uint32_t) cne1[3]);
+ 
+-        if (block_nums.z > 65535 || block_nums.y > 65535) {
++        // iluvatar port: the bi GPU rejects a launch whose gridDim.z * blockDim.z
++        // (or the y product) exceeds ~32768 with cudaErrorInvalidArgument - far
++        // below the CUDA 65535 grid limit. The linear-indexed unravel kernel is
++        // shape-agnostic, so over-limit products take it.
++        if (block_nums.z > 65535 || block_nums.y > 65535 ||
++            block_nums.z * block_dims.z > 32768 || block_nums.y * block_dims.y > 32768) {
+             int64_t     block_num   = (ne0 * ne1 * ne2 * ne3 + block_size - 1) / block_size;
+ 
+             GGML_ASSERT(block_num              <= std::numeric_limits<uint32_t>::max());
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/common.cuh /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/common.cuh
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/common.cuh	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/common.cuh	2026-10-10 22:18:10.629250149 +0800
+@@ -131,15 +131,15 @@
+ }
+ 
+ static __device__ __forceinline__ void ggml_cuda_pdl_sync() {
+-#if defined(GGML_CUDA_USE_PDL) && __CUDA_ARCH__ >= GGML_CUDA_CC_HOPPER
++#if defined(GGML_CUDA_USE_PDL) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_HOPPER
+     cudaGridDependencySynchronize();
+-#endif // defined(GGML_CUDA_USE_PDL) && __CUDA_ARCH__ >= GGML_CUDA_CC_HOPPER
++#endif // defined(GGML_CUDA_USE_PDL) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_HOPPER
+ }
+ 
+ static __device__ __forceinline__ void ggml_cuda_pdl_lc() {
+-#if defined(GGML_CUDA_USE_PDL) && __CUDA_ARCH__ >= GGML_CUDA_CC_HOPPER
++#if defined(GGML_CUDA_USE_PDL) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_HOPPER
+     cudaTriggerProgrammaticLaunchCompletion();
+-#endif // defined(GGML_CUDA_USE_PDL) && __CUDA_ARCH__ >= GGML_CUDA_CC_HOPPER
++#endif // defined(GGML_CUDA_USE_PDL) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_HOPPER
+ }
+ 
+ #ifdef __CUDA_ARCH_LIST__
+@@ -264,9 +264,9 @@
+ #define GGML_USE_VMM
+ #endif // (!defined(GGML_USE_HIP) && !defined(GGML_CUDA_NO_VMM)) || (defined(GGML_USE_HIP) && !defined(GGML_HIP_NO_VMM))
+ 
+-#if defined(GGML_USE_HIP) || defined(GGML_USE_MUSA) || __CUDA_ARCH__ >= GGML_CUDA_CC_PASCAL
++#if defined(GGML_USE_HIP) || defined(GGML_USE_MUSA) || GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_PASCAL
+ #define FP16_AVAILABLE
+-#endif // defined(GGML_USE_HIP) || defined(GGML_USE_MUSA) || __CUDA_ARCH__ >= GGML_CUDA_CC_PASCAL
++#endif // defined(GGML_USE_HIP) || defined(GGML_USE_MUSA) || GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_PASCAL
+ 
+ #if defined(FP16_AVAILABLE) && __CUDA_ARCH__ != 610
+ #define FAST_FP16_AVAILABLE
+@@ -281,25 +281,25 @@
+ #endif // defined(GGML_USE_HIP) && defined(RDNA4)
+ 
+ // The Volta instructions are in principle available on Turing or newer but they are effectively unusable:
+-#if !defined(GGML_USE_HIP) && __CUDA_ARCH__ == GGML_CUDA_CC_VOLTA
++#if !defined(GGML_USE_HIP) && GGML_CUDA_ARCH_NUM == GGML_CUDA_CC_VOLTA
+ #define VOLTA_MMA_AVAILABLE
+-#endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ == GGML_CUDA_CC_VOLTA
++#endif // !defined(GGML_USE_HIP) && GGML_CUDA_ARCH_NUM == GGML_CUDA_CC_VOLTA
+ 
+-#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_TURING
++#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_TURING
+ #define TURING_MMA_AVAILABLE
+-#endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_TURING
++#endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_TURING
+ 
+-#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+ #define AMPERE_MMA_AVAILABLE
+-#endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+ 
+-#if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL && __CUDA_ARCH__ < GGML_CUDA_CC_RUBIN
++#if !defined(GGML_USE_HIP) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_BLACKWELL && __CUDA_ARCH__ < GGML_CUDA_CC_RUBIN
+ #    define BLACKWELL_MMA_AVAILABLE
+-#endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL
++#endif // !defined(GGML_USE_HIP) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_BLACKWELL
+ 
+-#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+ #define CP_ASYNC_AVAILABLE
+-#endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+ 
+ #if !defined(GGML_CUDA_NO_FA) && !(defined(GGML_USE_MUSA) && __MUSA_ARCH__ < 220)
+ #define FLASH_ATTN_AVAILABLE
+@@ -400,11 +400,11 @@
+ #if defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
+     return 16;
+ #else
+-#if __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA
++#if GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_VOLTA
+     return 16;
+ #else
+     return 8;
+-#endif // __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA
++#endif // GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_VOLTA
+ #endif // defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
+ }
+ 
+@@ -421,13 +421,13 @@
+     printf("%s:%d: ERROR: CUDA kernel %s has no device code compatible with CUDA arch %d. ggml-cuda.cu was compiled for: %s\n",
+            file_name, line, function_name, arch, arch_list);
+ #endif // defined(GGML_USE_HIP)
+-    __trap();
++    ((void)0);
+ 
+     GGML_UNUSED(no_device_code); // suppress unused function warning
+ }
+ 
+ #ifdef __CUDA_ARCH__
+-#define NO_DEVICE_CODE no_device_code(__FILE__, __LINE__, __FUNCTION__, __CUDA_ARCH__, STRINGIZE(__CUDA_ARCH_LIST__))
++#define NO_DEVICE_CODE ((void)0); // iluvatar: no device printf(__FILE__, __LINE__, __FUNCTION__, __CUDA_ARCH__, STRINGIZE(__CUDA_ARCH_LIST__))
+ #else
+ #define NO_DEVICE_CODE //GGML_ABORT("NO_DEVICE_CODE not valid in host code.")
+ #endif // __CUDA_ARCH__
+@@ -453,7 +453,7 @@
+ 
+ template<int width = WARP_SIZE>
+ static __device__ __forceinline__ int warp_reduce_sum(int x) {
+-#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+     return __reduce_add_sync(0xffffffff, x);
+ #else
+ #pragma unroll
+@@ -461,7 +461,7 @@
+         x += __shfl_xor_sync(0xffffffff, x, offset, width);
+     }
+     return x;
+-#endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+ }
+ 
+ template<int width = WARP_SIZE>
+@@ -737,13 +737,13 @@
+ 
+ #else // defined(GGML_USE_HIP)
+ 
+-#if __CUDA_ARCH__ >= GGML_CUDA_CC_DP4A || defined(GGML_USE_MUSA)
++#if GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_DP4A && !defined(GGML_ILUVATAR_NO_DP4A) || defined(GGML_USE_MUSA)
+     return __dp4a(a, b, c);
+-#else // __CUDA_ARCH__ >= GGML_CUDA_CC_DP4A || defined(GGML_USE_MUSA)
++#else // GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_DP4A || defined(GGML_USE_MUSA)
+     const int8_t * a8 = (const int8_t *) &a;
+     const int8_t * b8 = (const int8_t *) &b;
+     return c + a8[0]*b8[0] + a8[1]*b8[1] + a8[2]*b8[2] + a8[3]*b8[3];
+-#endif // __CUDA_ARCH__ >= GGML_CUDA_CC_DP4A || defined(GGML_USE_MUSA)
++#endif // GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_DP4A || defined(GGML_USE_MUSA)
+ 
+ #endif // defined(GGML_USE_HIP)
+ }
+@@ -1687,11 +1687,11 @@
+ #endif //defined(GGML_CUDA_USE_PDL)
+ 
+ // PDL and __restrict__ need to be mutually exclusive, see https://github.com/ggml-org/llama.cpp/pull/24030
+-# if (defined(GGML_CUDA_USE_PDL) && __CUDA_ARCH__ >= GGML_CUDA_CC_HOPPER)
++# if (defined(GGML_CUDA_USE_PDL) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_HOPPER)
+ # define GGML_CUDA_RESTRICT
+ # else
+ # define GGML_CUDA_RESTRICT __restrict__
+-# endif // defined(GGML_CUDA_USE_PDL) && __CUDA_ARCH__ >= GGML_CUDA_CC_HOPPER
++# endif // defined(GGML_CUDA_USE_PDL) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_HOPPER
+ 
+ template<typename Kernel, typename... Args>
+ static __inline__ void ggml_cuda_kernel_launch(Kernel kernel, const ggml_cuda_kernel_launch_params & launch_params, Args&&... args) {
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/convert.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/convert.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/convert.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/convert.cu	2026-10-10 15:59:42.275860069 +0800
+@@ -42,7 +42,7 @@
+ 
+ template <bool need_check>
+ static __global__ void dequantize_block_q8_0_f16(const void * __restrict__ vx, half * __restrict__ y, const int64_t k) {
+-#if __CUDA_ARCH__ >= GGML_CUDA_CC_PASCAL
++#if GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_PASCAL
+     constexpr int nint = CUDA_Q8_0_NE_ALIGN/sizeof(int) + WARP_SIZE;
+ 
+     const int64_t   i0 = CUDA_Q8_0_NE_ALIGN*blockIdx.x;
+@@ -78,7 +78,7 @@
+ #else
+     GGML_UNUSED_VARS(vx, y, k);
+     NO_DEVICE_CODE;
+-#endif // __CUDA_ARCH__ >= GGML_CUDA_CC_PASCAL
++#endif // GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_PASCAL
+ }
+ 
+ template<typename dst_t>
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/convert.cuh /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/convert.cuh
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/convert.cuh	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/convert.cuh	2026-10-10 15:59:42.271860109 +0800
+@@ -45,11 +45,11 @@
+ #ifdef GGML_USE_HIP
+         return make_float2(__bfloat162float(__low2bfloat16(x)), __bfloat162float(__high2bfloat16(x)));
+ #else
+-#if !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= 800
++#if !defined(GGML_USE_MUSA) && GGML_CUDA_ARCH_NUM >= 800
+         return __bfloat1622float2(x);
+ #else
+         return make_float2(__bfloat162float(x.x), __bfloat162float(x.y));
+-#endif // !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= 800
++#endif // !defined(GGML_USE_MUSA) && GGML_CUDA_ARCH_NUM >= 800
+ #endif // GGML_USE_HIP
+     } else if constexpr(std::is_same_v<src_t, float2> && std::is_same_v<dst_t, nv_bfloat162>) {
+         // bypass compile error on cuda 12.0.1
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/fattn-common.cuh /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/fattn-common.cuh
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/fattn-common.cuh	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/fattn-common.cuh	2026-10-11 08:37:35.795871628 +0800
+@@ -666,62 +666,7 @@
+     }
+ }
+ 
+-template <int ncols1>
+-__launch_bounds__(FATTN_KQ_STRIDE/2, 1)
+-static __global__ void flash_attn_mask_to_KV_max(
+-        const half2 * mask_ptr, int * KV_max_ptr, const int ne30, const int64_t s31, const int64_t s33) {
+-    const half2 * GGML_CUDA_RESTRICT mask   = mask_ptr;
+-    int         * GGML_CUDA_RESTRICT KV_max = KV_max_ptr;
+-
+-    const int ne31     = gridDim.x;
+-    const int tid      = threadIdx.x;
+-    const int sequence = blockIdx.y;
+-    const int jt       = blockIdx.x;
+-
+-    mask += sequence*s33 + jt*ncols1*s31;
+-
+-    __shared__ int buf_iw[WARP_SIZE];
+-    if (tid < WARP_SIZE) {
+-        buf_iw[tid] = 1;
+-    }
+-    ggml_cuda_pdl_sync();
+-    __syncthreads();
+-
+-    int KV_max_sj = (ne30 - 1) * FATTN_KQ_STRIDE;
+-    for (; KV_max_sj >= 0; KV_max_sj -= FATTN_KQ_STRIDE) {
+-        int all_inf = 1;
+-
+-#pragma unroll
+-        for (int j = 0; j < ncols1; ++j) {
+-            const float2 tmp = __half22float2(mask[j*s31 + KV_max_sj/2 + tid]);
+-            all_inf = all_inf && int(isinf(tmp.x)) && int(isinf(tmp.y));
+-        }
+-
+-        all_inf = warp_reduce_all(all_inf);
+-        if (tid % WARP_SIZE == 0) {
+-            buf_iw[tid / WARP_SIZE] = all_inf;
+-        }
+-        __syncthreads();
+-        all_inf = buf_iw[tid % WARP_SIZE];
+-        __syncthreads();
+-        all_inf = warp_reduce_all(all_inf);
+-
+-        if (!all_inf) {
+-            break;
+-        }
+-    }
+-
+-    // If the break in the loop was not triggered, KV_max_sj is now -FATTN_KQ_STRIDE.
+-    // If the break was triggered it's the lower edge of the tile with the first non-masked values.
+-    // In either case, walk back the decrementation by FATTN_KQ_STRIDE.
+-    KV_max_sj += FATTN_KQ_STRIDE;
+-
+-    if (threadIdx.x != 0) {
+-        return;
+-    }
+-
+-    KV_max[sequence*ne31 + jt] = KV_max_sj;
+-}
++// iluvatar port: flash_attn_mask_to_KV_max removed (bi llc crash)
+ 
+ void ggml_cuda_flash_attn_ext_compact_mask(
+         const ggml_tensor * mask, int32_t * indices, int32_t * counts, int32_t n_queries, int32_t ncols1, int32_t n_kv_max, cudaStream_t stream);
+@@ -1114,23 +1059,8 @@
+     // Optional optimization where the mask is scanned to determine whether part of the calculation can be skipped.
+     // Only worth the overhead if there is at lease one FATTN_KQ_STRIDE x FATTN_KQ_STRIDE square to be skipped or
+     //     multiple sequences of possibly different lengths.
+-    const bool scan_mask = !use_sparse && mask && K->ne[1] % FATTN_KQ_STRIDE == 0 && (Q->ne[1] >= 1024 || Q->ne[3] > 1);
+-    if (scan_mask) {
+-        const int64_t s31 = mask->nb[1] / sizeof(half2);
+-        const int64_t s33 = mask->nb[3] / sizeof(half2);
+-
+-        const dim3 blocks_num_KV_max(ntiles_x, Q->ne[3], 1);
+-        const dim3 block_dim_KV_max(FATTN_KQ_STRIDE/2, 1, 1);
+-
+-        const int ne_KV_max = blocks_num_KV_max.x*blocks_num_KV_max.y;
+-        const int iter_k = K->ne[1] / FATTN_KQ_STRIDE;
+-
+-        KV_max.alloc(ne_KV_max);
+-        ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(blocks_num_KV_max, block_dim_KV_max, 0, main_stream);
+-        ggml_cuda_kernel_launch(flash_attn_mask_to_KV_max<ncols1>, launch_params,
+-            (const half2 *) mask->data, KV_max.ptr, iter_k, s31, s33);
+-        CUDA_CHECK(cudaGetLastError());
+-    }
++    const bool scan_mask = false; // iluvatar port
++    // iluvatar port: mask-scan launch removed
+ 
+     const dim3 block_dim(warp_size, nwarps, 1);
+     int max_blocks_per_sm = 1; // Max. number of active blocks limited by occupancy.
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/fattn-mma-f16.cuh /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/fattn-mma-f16.cuh
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/fattn-mma-f16.cuh	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/fattn-mma-f16.cuh	2026-10-10 15:59:42.263860187 +0800
+@@ -1851,12 +1851,12 @@
+     }
+ #endif // VOLTA_MMA_AVAILABLE
+ 
+-#if __CUDA_ARCH__ == GGML_CUDA_CC_TURING
++#if GGML_CUDA_ARCH_NUM == GGML_CUDA_CC_TURING
+     if (ncols1*ncols2 > 32) {
+         NO_DEVICE_CODE;
+         return;
+     }
+-#endif // __CUDA_ARCH__ == GGML_CUDA_CC_TURING
++#endif // GGML_CUDA_ARCH_NUM == GGML_CUDA_CC_TURING
+ 
+ #if defined(AMD_WMMA_AVAILABLE)
+     if (ncols1*ncols2 < 16 || ncols2 == 1 || DKQ > 256) {
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/fattn-tile.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/fattn-tile.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/fattn-tile.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/fattn-tile.cu	2026-10-10 19:26:04.592487051 +0800
+@@ -7,51 +7,51 @@
+     switch (K->ne[0]) {
+         case  40: {
+             GGML_ASSERT(V->ne[0] == K->ne[0]);
+-            ggml_cuda_flash_attn_ext_tile_case< 40,  40>(ctx, dst);
++            /* iluvatar port: removed */ (void)0;
+         } break;
+         case  64: {
+             GGML_ASSERT(V->ne[0] == K->ne[0]);
+-            ggml_cuda_flash_attn_ext_tile_case< 64,  64>(ctx, dst);
++            /* iluvatar port: removed */ (void)0;
+         } break;
+         case  72: {
+             GGML_ASSERT(V->ne[0] == K->ne[0]);
+-            ggml_cuda_flash_attn_ext_tile_case< 72,  72>(ctx, dst);
++            /* iluvatar port: removed */ (void)0;
+         } break;
+         case  80: {
+             GGML_ASSERT(V->ne[0] == K->ne[0]);
+-            ggml_cuda_flash_attn_ext_tile_case< 80,  80>(ctx, dst);
++            /* iluvatar port: removed */ (void)0;
+         } break;
+         case  96: {
+             GGML_ASSERT(V->ne[0] == K->ne[0]);
+-            ggml_cuda_flash_attn_ext_tile_case< 96,  96>(ctx, dst);
++            /* iluvatar port: removed */ (void)0;
+         } break;
+         case 112: {
+             GGML_ASSERT(V->ne[0] == K->ne[0]);
+-            ggml_cuda_flash_attn_ext_tile_case<112, 112>(ctx, dst);
++            /* iluvatar port: removed */ (void)0;
+         } break;
+         case 128: {
+             GGML_ASSERT(V->ne[0] == K->ne[0]);
+-            ggml_cuda_flash_attn_ext_tile_case<128, 128>(ctx, dst);
++            /* iluvatar port: removed */ (void)0;
+         } break;
+         case 192: {
+             GGML_ASSERT(V->ne[0] == 128);
+-            ggml_cuda_flash_attn_ext_tile_case<192, 128>(ctx, dst);
++            /* iluvatar port: removed */ (void)0;
+         } break;
+         case 256: {
+             GGML_ASSERT(V->ne[0] == K->ne[0]);
+-            ggml_cuda_flash_attn_ext_tile_case<256, 256>(ctx, dst);
++            /* iluvatar port: removed */ (void)0;
+         } break;
+         case 320: {
+             GGML_ASSERT(V->ne[0] == 256);
+-            ggml_cuda_flash_attn_ext_tile_case<320, 256>(ctx, dst);
++            /* iluvatar port: removed */ (void)0;
+         } break;
+         case 512: {
+             GGML_ASSERT(V->ne[0] == K->ne[0]);
+-            ggml_cuda_flash_attn_ext_tile_case<512, 512>(ctx, dst);
++            /* iluvatar port: removed */ (void)0;
+         } break;
+         case 576: {
+             GGML_ASSERT(V->ne[0] == 512);
+-            ggml_cuda_flash_attn_ext_tile_case<576, 512>(ctx, dst);
++            /* iluvatar port: removed */ (void)0;
+         } break;
+         default: {
+             GGML_ABORT("Unsupported head size");
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/fattn-vec.cuh /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/fattn-vec.cuh
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/fattn-vec.cuh	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/fattn-vec.cuh	2026-10-11 08:37:35.795871628 +0800
+@@ -281,6 +281,14 @@
+                     sum += slope*__half2float(maskh[j*ne11 + i_KQ]);
+                 }
+ 
++                // iluvatar port: the tile kernel (which carries the oob_check) is
++                // bypassed, so the vec kernel must mask KV rows past the sequence
++                // length itself. Applied LAST so an out-of-bounds mask read cannot
++                // drag the -inf to NaN. exp() then drops the row entirely.
++                if (k_VKQ_0 + i_KQ >= k_VKQ_max) {
++                    sum = -INFINITY;
++                }
++
+                 KQ_max_new[j] = fmaxf(KQ_max_new[j], sum + FATTN_KQ_MAX_OFFSET);
+ 
+                 if ((nthreads_KQ == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_KQ) == uint32_t(i_KQ_0)) {
+@@ -323,6 +331,12 @@
+         for (int k0 = 0; k0 < WARP_SIZE; k0 += V_cols_per_iter) {
+             const int k = threadIdx.y*WARP_SIZE + k0 + (nthreads_V == WARP_SIZE ? 0 : threadIdx.x / nthreads_V);
+ 
++            // iluvatar port: skip out-of-range KV rows entirely - their dequantized
++            // V can hold inf/NaN bits from the cache slack and 0*NaN is NaN.
++            if (k_VKQ_0 + k >= k_VKQ_max) {
++                continue;
++            }
++
+ #ifdef V_DOT2_F32_F16_AVAILABLE
+             half2 KQ_k[ncols];
+ #pragma unroll
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/fattn.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/fattn.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/fattn.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/fattn.cu	2026-10-11 08:18:52.765835646 +0800
+@@ -161,7 +161,7 @@
+         // a sparse variant at the full tile width gathers the union of its queries once, prefer it for large batches
+         constexpr bool has_wide_sparse = ggml_cuda_flash_attn_ext_mma_f16_may_use_sparse(DKQ, DV, 64/ncols2, ncols2);
+         if (!(has_wide_sparse && Q->ne[1] > 32/ncols2) && ggml_cuda_flash_attn_ext_mma_f16_shall_use_sparse(cc, dst, 1, ncols2)) {
+-            ggml_cuda_flash_attn_ext_mma_f16_case<DKQ, DV, 1, ncols2>(ctx, dst);
++            /* iluvatar port: FA case call removed */ (void)0;
+             return;
+         }
+     }
+@@ -169,25 +169,25 @@
+ 
+     if constexpr (ncols2 <= 8) {
+         if (turing_mma_available(cc) && Q->ne[1] <= 8/ncols2) {
+-            ggml_cuda_flash_attn_ext_mma_f16_case<DKQ, DV, 8/ncols2, ncols2>(ctx, dst);
++            /* iluvatar port: FA case call removed */ (void)0;
+             return;
+         }
+     }
+ 
+     if constexpr (ncols2 <= 16) {
+         if (Q->ne[1] <= 16/ncols2) {
+-            ggml_cuda_flash_attn_ext_mma_f16_case<DKQ, DV, 16/ncols2, ncols2>(ctx, dst);
++            /* iluvatar port: FA case call removed */ (void)0;
+             return;
+         }
+     }
+ 
+     if (Q->ne[1] <= 32/ncols2 || (GGML_CUDA_CC_IS_NVIDIA(cc) && ggml_cuda_highest_compiled_arch(cc) == GGML_CUDA_CC_TURING) ||
+             (GGML_CUDA_CC_IS_AMD(cc) && DKQ > 256)) {
+-        ggml_cuda_flash_attn_ext_mma_f16_case<DKQ, DV, 32/ncols2, ncols2>(ctx, dst);
++        /* iluvatar port: FA case call removed */ (void)0;
+         return;
+     }
+ 
+-    ggml_cuda_flash_attn_ext_mma_f16_case<DKQ, DV, 64/ncols2, ncols2>(ctx, dst);
++    /* iluvatar port: FA case call removed */ (void)0;
+ }
+ 
+ template <int DKQ, int DV>
+@@ -632,7 +632,10 @@
+ 
+     // For small batch sizes the vector kernel may be preferable over the kernels optimized for large batch sizes:
+     // 192 satisfies % 64 == 0 but has no vec instance (DKQ != DV); force it onto the MMA path.
+-    const bool can_use_vector_kernel = Q->ne[0] <= 256 && Q->ne[0] % 64 == 0 && Q->ne[0] != 192 && K->ne[1] % FATTN_KQ_STRIDE == 0;
++    // iluvatar port: dropped `K->ne[1] % FATTN_KQ_STRIDE == 0` - the vec kernel
++    // never uses FATTN_KQ_STRIDE (only the tile/mma paths do); with the tile
++    // kernel bypassed the condition only needlessly routed shapes to abort.
++    const bool can_use_vector_kernel = Q->ne[0] <= 256 && Q->ne[0] % 64 == 0 && Q->ne[0] != 192;
+ 
+     // If Turing tensor cores are available, use them:
+     if (turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
+@@ -674,10 +677,13 @@
+         if (can_use_vector_kernel && Q->ne[1] * gqa_ratio_eff <= 2) {
+             return BEST_FATTN_KERNEL_VEC;
+         }
+-        if (Q->ne[1] * gqa_ratio_eff <= 16) {
+-            return BEST_FATTN_KERNEL_TILE; // On Volta tensor cores are only faster for sufficiently large matrices.
++        // iluvatar port: the tile kernel miscomputes on BI-V150 (every batch>1
++        // FLASH_ATTN_EXT case returns garbage; the vec kernel is exact). Take the
++        // vec kernel for anything it can serve and the generic path otherwise.
++        if (can_use_vector_kernel) {
++            return BEST_FATTN_KERNEL_VEC;
+         }
+-        return BEST_FATTN_KERNEL_MMA_F16;
++        return BEST_FATTN_KERNEL_NONE;
+     }
+ 
+     // AMD MFMA needs a certain minimum batch size to outscale the tile kernel for large head sizes.
+@@ -716,7 +722,11 @@
+             }
+         }
+     }
+-    return BEST_FATTN_KERNEL_TILE;
++    // iluvatar port: prefer the vec kernel over the (broken) tile kernel
++    if (can_use_vector_kernel) {
++        return BEST_FATTN_KERNEL_VEC;
++    }
++    return BEST_FATTN_KERNEL_NONE;
+ }
+ 
+ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * dst) {
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/ggml-cuda.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/ggml-cuda.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/ggml-cuda.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/ggml-cuda.cu	2026-10-11 07:27:15.569110039 +0800
+@@ -308,11 +308,11 @@
+         info.devices[id].integrated = false; // Temporarily disabled due to issues with corrupted output (e.g. #15034)
+         info.devices[id].nsm        = prop.multiProcessorCount;
+         info.devices[id].smpb       = prop.sharedMemPerBlock;
+-        info.devices[id].warp_size  = prop.warpSize;
++        info.devices[id].warp_size  = prop.warpSize > 32 ? 32 : prop.warpSize; // iluvatar: bi reports warpSize 64, kernels are compiled for 32
+ 
+         int supports_coop_launch = 0;
+         CUDA_CHECK(cudaDeviceGetAttribute(&supports_coop_launch, cudaDevAttrCooperativeLaunch, physical_id));
+-        info.devices[id].supports_cooperative_launch = !!supports_coop_launch;
++        info.devices[id].supports_cooperative_launch = false; // iluvatar port: cooperative groups grid sync unavailable
+ 
+ #if defined(GGML_USE_HIP)
+         info.devices[id].smpbo = prop.sharedMemPerBlock;
+@@ -2732,19 +2732,17 @@
+     cudaError_t stat = cudaGraphExecUpdate(graph->instance, graph->graph, &errorNode, &result_info);
+ #endif // CUDART_VERSION >= 12000
+ 
+-    if (stat == cudaErrorGraphExecUpdateFailure) {
++    // iluvatar port: CoreX 10.2's cudaGraphExecUpdate returns errors beyond the
++    // documented GraphExecUpdateFailure set on valid updates; ANY failure falls
++    // back to destroy + re-instantiate instead of aborting.
++    if (stat != cudaSuccess) {
+ #ifndef NDEBUG
+-        GGML_LOG_DEBUG("%s: CUDA graph update failed\n", __func__);
++        GGML_LOG_DEBUG("%s: CUDA graph update failed (%s), re-instantiating\n", __func__, cudaGetErrorString(stat));
+ #endif
+-
+-        // The pre-existing graph exec cannot be updated due to violated constraints
+-        // so instead clear error and re-instantiate
+         (void)cudaGetLastError();
+         CUDA_CHECK(cudaGraphExecDestroy(graph->instance));
+         graph->instance = nullptr;
+         CUDA_CHECK(cudaGraphInstantiate(&graph->instance, graph->graph, NULL, NULL, 0));
+-    } else {
+-        GGML_ASSERT(stat == cudaSuccess);
+     }
+ }
+ #endif // USE_CUDA_GRAPH
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/mma.cuh /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/mma.cuh
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/mma.cuh	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/mma.cuh	2026-10-10 15:59:42.259860226 +0800
+@@ -1058,7 +1058,7 @@
+     static __device__ __forceinline__ void mma(
+             tile<16, 8, int> & D, const tile<16, 4, int> & A, const tile<8, 4, int> & B) {
+ #ifdef TURING_MMA_AVAILABLE
+-#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#if GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+         asm("mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32 {%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};"
+             : "+r"(D.x[0]), "+r"(D.x[1]), "+r"(D.x[2]), "+r"(D.x[3])
+             : "r"(A.x[0]), "r"(A.x[1]), "r"(B.x[0]));
+@@ -1070,7 +1070,7 @@
+         asm("mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%0, %1}, {%2}, {%3}, {%0, %1};"
+             : "+r"(D.x[2]), "+r"(D.x[3])
+             : "r"(A.x[1]), "r"(B.x[0]));
+-#endif // __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#endif // GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+ #else
+         GGML_UNUSED_VARS(D, A, B);
+         NO_DEVICE_CODE;
+@@ -1080,7 +1080,7 @@
+     static __device__ __forceinline__ void mma(
+             tile<16, 8, int> & D, const tile<16, 8, int> & A, const tile<8, 8, int> & B) {
+ #ifdef TURING_MMA_AVAILABLE
+-#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#if GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+         asm("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
+             : "+r"(D.x[0]), "+r"(D.x[1]), "+r"(D.x[2]), "+r"(D.x[3])
+             : "r"(A.x[0]), "r"(A.x[1]), "r"(A.x[2]), "r"(A.x[3]), "r"(B.x[0]), "r"(B.x[1]));
+@@ -1098,7 +1098,7 @@
+         asm("mma.sync.aligned.m8n8k16.row.col.s32.s8.s8.s32 {%0, %1}, {%2}, {%3}, {%0, %1};"
+             : "+r"(D.x[2]), "+r"(D.x[3])
+             : "r"(A.x[3]), "r"(B.x[1]));
+-#endif // __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#endif // GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+ #else
+         GGML_UNUSED_VARS(D, A, B);
+         NO_DEVICE_CODE;
+@@ -1111,7 +1111,7 @@
+         const int * Axi = (const int *) A.x;
+         const int * Bxi = (const int *) B.x;
+         int       * Dxi = (int       *) D.x;
+-#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#if GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+         asm("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0, %1}, {%2, %3, %4, %5}, {%6, %7}, {%0, %1};"
+             : "+r"(Dxi[0]), "+r"(Dxi[1])
+             : "r"(Axi[0]), "r"(Axi[1]), "r"(Axi[2]), "r"(Axi[3]), "r"(Bxi[0]), "r"(Bxi[1]));
+@@ -1123,7 +1123,7 @@
+         asm("mma.sync.aligned.m16n8k8.row.col.f16.f16.f16.f16 {%0, %1}, {%2, %3}, {%4}, {%0, %1};"
+             : "+r"(Dxi[0]), "+r"(Dxi[1])
+             : "r"(Axi[2]), "r"(Axi[3]), "r"(Bxi[1]));
+-#endif // __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#endif // GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+ #else
+         GGML_UNUSED_VARS(D, A, B);
+         NO_DEVICE_CODE;
+@@ -1136,7 +1136,7 @@
+         const int * Axi = (const int *) A.x;
+         const int * Bxi = (const int *) B.x;
+         int       * Dxi = (int       *) D.x;
+-#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#if GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+         asm("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0, %1}, {%2, %3, %4, %5}, {%6, %7}, {%0, %1};"
+             : "+r"(Dxi[0]), "+r"(Dxi[1])
+             : "r"(Axi[0]), "r"(Axi[1]), "r"(Axi[2]), "r"(Axi[3]), "r"(Bxi[0]), "r"(Bxi[2]));
+@@ -1157,7 +1157,7 @@
+         asm("mma.sync.aligned.m16n8k8.row.col.f16.f16.f16.f16 {%0, %1}, {%2, %3}, {%4}, {%0, %1};"
+             : "+r"(Dxi[2]), "+r"(Dxi[3])
+             : "r"(Axi[2]), "r"(Axi[3]), "r"(Bxi[3]));
+-#endif // __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#endif // GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+ #elif defined(AMD_WMMA_AVAILABLE)
+ #if defined(RDNA4)
+         using halfx8_t = __attribute__((ext_vector_type(8))) _Float16;
+@@ -1297,7 +1297,7 @@
+         const int * Axi = (const int *) A.x;
+         const int * Bxi = (const int *) B.x;
+         int       * Dxi = (int       *) D.x;
+-#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#if GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+         asm("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
+             : "+r"(Dxi[0]), "+r"(Dxi[1]), "+r"(Dxi[2]), "+r"(Dxi[3])
+             : "r"(Axi[0]), "r"(Axi[1]), "r"(Axi[2]), "r"(Axi[3]), "r"(Bxi[0]), "r"(Bxi[1]));
+@@ -1309,7 +1309,7 @@
+         asm("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};"
+             : "+r"(Dxi[0]), "+r"(Dxi[1]), "+r"(Dxi[2]), "+r"(Dxi[3])
+             : "r"(Axi[2]), "r"(Axi[3]), "r"(Bxi[1]));
+-#endif // __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#endif // GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+ #else
+         GGML_UNUSED_VARS(D, A, B);
+         NO_DEVICE_CODE;
+@@ -1338,7 +1338,7 @@
+         const int * Axi = (const int *) A.x;
+         const int * Bxi = (const int *) B.x;
+         int       * Dxi = (int       *) D.x;
+-#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#if GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+         asm("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
+             : "+r"(Dxi[0]), "+r"(Dxi[1]), "+r"(Dxi[2]), "+r"(Dxi[3])
+             : "r"(Axi[0]), "r"(Axi[1]), "r"(Axi[2]), "r"(Axi[3]), "r"(Bxi[0]), "r"(Bxi[2]));
+@@ -1359,7 +1359,7 @@
+         asm("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5}, {%6}, {%0, %1, %2, %3};"
+             : "+r"(Dxi[4]), "+r"(Dxi[5]), "+r"(Dxi[6]), "+r"(Dxi[7])
+             : "r"(Axi[2]), "r"(Axi[3]), "r"(Bxi[3]));
+-#endif // __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
++#endif // GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_AMPERE
+ #elif defined(AMD_WMMA_AVAILABLE)
+ #if defined(RDNA4)
+         using halfx8_t = __attribute__((ext_vector_type(8))) _Float16;
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/mmq.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/mmq.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/mmq.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/mmq.cu	2026-10-11 06:29:39.517258952 +0800
+@@ -5,72 +5,73 @@
+ 
+ #include <cstdint>
+ 
++#if 0  // iluvatar port: MMQ compiled out (see ggml_cuda_mul_mat_q below)
+ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream, const ggml_prec prec_src1) {
+     switch (args.type_x) {
+-        case GGML_TYPE_Q1_0:
++        // iluvatar port: case GGML_TYPE_Q1_0: not instantiated
+             mul_mat_q_case<GGML_TYPE_Q1_0, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+-        case GGML_TYPE_Q2_0:
++        // iluvatar port: case GGML_TYPE_Q2_0: not instantiated
+             mul_mat_q_case<GGML_TYPE_Q2_0, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+-        case GGML_TYPE_Q4_0:
++        // iluvatar port: case GGML_TYPE_Q4_0: not instantiated
+             mul_mat_q_case<GGML_TYPE_Q4_0, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+-        case GGML_TYPE_Q4_1:
++        // iluvatar port: case GGML_TYPE_Q4_1: not instantiated
+             mul_mat_q_case<GGML_TYPE_Q4_1, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+-        case GGML_TYPE_Q5_0:
++        // iluvatar port: case GGML_TYPE_Q5_0: not instantiated
+             mul_mat_q_case<GGML_TYPE_Q5_0, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+-        case GGML_TYPE_Q5_1:
++        // iluvatar port: case GGML_TYPE_Q5_1: not instantiated
+             mul_mat_q_case<GGML_TYPE_Q5_1, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+-        case GGML_TYPE_Q8_0:
++        // iluvatar port: case GGML_TYPE_Q8_0: not instantiated
+             mul_mat_q_case<GGML_TYPE_Q8_0, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+ // -----------------------------------------------------------------------
+         case GGML_TYPE_Q2_K:
+             mul_mat_q_case<GGML_TYPE_Q2_K, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+-        case GGML_TYPE_Q3_K:
++        // iluvatar port: case GGML_TYPE_Q3_K: not instantiated
+             mul_mat_q_case<GGML_TYPE_Q3_K, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+         case GGML_TYPE_Q4_K:
+             mul_mat_q_case<GGML_TYPE_Q4_K, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+-        case GGML_TYPE_Q5_K:
++        // iluvatar port: case GGML_TYPE_Q5_K: not instantiated
+             mul_mat_q_case<GGML_TYPE_Q5_K, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+         case GGML_TYPE_Q6_K:
+             mul_mat_q_case<GGML_TYPE_Q6_K, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+ // -----------------------------------------------------------------------
+-        case GGML_TYPE_IQ1_S:
++        // iluvatar port: case GGML_TYPE_IQ1_S: not instantiated
+             mul_mat_q_case<GGML_TYPE_IQ1_S, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+-        case GGML_TYPE_IQ2_XXS:
++        // iluvatar port: case GGML_TYPE_IQ2_XXS: not instantiated
+             mul_mat_q_case<GGML_TYPE_IQ2_XXS, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+-        case GGML_TYPE_IQ2_XS:
++        // iluvatar port: case GGML_TYPE_IQ2_XS: not instantiated
+             mul_mat_q_case<GGML_TYPE_IQ2_XS, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+-        case GGML_TYPE_IQ2_S:
++        // iluvatar port: case GGML_TYPE_IQ2_S: not instantiated
+             mul_mat_q_case<GGML_TYPE_IQ2_S, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+-        case GGML_TYPE_IQ3_XXS:
++        // iluvatar port: case GGML_TYPE_IQ3_XXS: not instantiated
+             mul_mat_q_case<GGML_TYPE_IQ3_XXS, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+-        case GGML_TYPE_IQ3_S:
++        // iluvatar port: case GGML_TYPE_IQ3_S: not instantiated
+             mul_mat_q_case<GGML_TYPE_IQ3_S, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+-        case GGML_TYPE_IQ4_XS:
++        // iluvatar port: case GGML_TYPE_IQ4_XS: not instantiated
+             mul_mat_q_case<GGML_TYPE_IQ4_XS, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+-        case GGML_TYPE_IQ4_NL:
++        // iluvatar port: case GGML_TYPE_IQ4_NL: not instantiated
+             mul_mat_q_case<GGML_TYPE_IQ4_NL, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+ // -----------------------------------------------------------------------
+-        case GGML_TYPE_MXFP4:
++        // iluvatar port: case GGML_TYPE_MXFP4: not instantiated
+             // src1 at Q4 uses the native FP4 instructions, which are Blackwell-only
+             if (prec_src1 == GGML_PREC_Q4) {
+                 mul_mat_q_case<GGML_TYPE_MXFP4, GGML_PREC_Q4>(ctx, args, stream);
+@@ -78,7 +79,7 @@
+             }
+             mul_mat_q_case<GGML_TYPE_MXFP4, GGML_PREC_Q8>(ctx, args, stream);
+             break;
+-        case GGML_TYPE_NVFP4:
++        // iluvatar port: case GGML_TYPE_NVFP4: not instantiated
+             if (prec_src1 == GGML_PREC_Q4) {
+                 mul_mat_q_case<GGML_TYPE_NVFP4, GGML_PREC_Q4>(ctx, args, stream);
+                 break;
+@@ -92,6 +93,7 @@
+ }
+ 
+ // overrides the src1 precision requested by the graph, "auto" keeps the requested one
++#endif // iluvatar port: MMQ compiled out
+ static ggml_prec ggml_cuda_mmq_get_prec_env() {
+     const char * env_c = getenv("GGML_CUDA_MMQ_PREC");
+     if (env_c == nullptr) {
+@@ -134,6 +136,13 @@
+ 
+ void ggml_cuda_mul_mat_q(
+         ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst) {
++    // iluvatar port: the whole MMQ prompt path is compiled out (bi llc cannot
++    // process the dp4a-emulated template IR in reasonable time). ggml-cuda.cu
++    // checks ggml_cuda_should_use_mmq() first, which returns false, so this
++    // body never runs; the assert documents the invariant.
++    GGML_UNUSED(ctx); GGML_UNUSED(src0); GGML_UNUSED(src1); GGML_UNUSED(ids); GGML_UNUSED(dst);
++    GGML_ABORT("iluvatar port: MMQ compiled out");
++#if 0
+     GGML_ASSERT(        src1->type == GGML_TYPE_F32);
+     GGML_ASSERT(        dst->type  == GGML_TYPE_F32);
+     GGML_ASSERT(!ids || ids->type  == GGML_TYPE_I32); // Optional, used for batched GGML_MUL_MAT_ID.
+@@ -351,9 +360,16 @@
+         ne12, J_best};
+ 
+     ggml_cuda_mul_mat_q_switch_type(ctx, args, stream, prec_src1);
++#endif // iluvatar port: MMQ compiled out
+ }
+ 
+ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t n_experts) {
++    // iluvatar port: MMQ (the quant prompt kernels) is disabled wholesale: with the
++    // dp4a byte-product emulation the bi llc needs 1h+ CPU per instantiated type.
++    // Decode keeps MMVQ (mul_mat_vec_q, a separate path); prompt products take the
++    // dequant + cuBLAS route.
++    (void) type; (void) cc; (void) ne11; (void) n_experts;
++    return false;
+ #ifdef GGML_CUDA_FORCE_CUBLAS
+     return false;
+ #endif // GGML_CUDA_FORCE_CUBLAS
+@@ -361,31 +377,33 @@
+     bool mmq_supported;
+ 
+     switch (type) {
+-        case GGML_TYPE_Q1_0:
+-        case GGML_TYPE_Q2_0:
+-        case GGML_TYPE_Q4_0:
+-        case GGML_TYPE_Q4_1:
+-        case GGML_TYPE_Q5_0:
+-        case GGML_TYPE_Q5_1:
+-        case GGML_TYPE_Q8_0:
++        // iluvatar port: case GGML_TYPE_Q1_0: not instantiated
++        // iluvatar port: case GGML_TYPE_Q2_0: not instantiated
++        // iluvatar port: case GGML_TYPE_Q4_0: not instantiated
++        // iluvatar port: case GGML_TYPE_Q4_1: not instantiated
++        // iluvatar port: case GGML_TYPE_Q5_0: not instantiated
++        // iluvatar port: case GGML_TYPE_Q5_1: not instantiated
++        // iluvatar port: case GGML_TYPE_Q8_0: not instantiated
+ // -------------------------------------------------
+-        case GGML_TYPE_Q2_K:
+-        case GGML_TYPE_Q3_K:
++        // iluvatar port: Q2_K MMQ is not instantiated (the dp4a byte-emulation
++        // makes the bi llc spend 1h+ on that TU); the type keeps the generic path
++        // case GGML_TYPE_Q2_K:
++        // iluvatar port: case GGML_TYPE_Q3_K: not instantiated
+         case GGML_TYPE_Q4_K:
+-        case GGML_TYPE_Q5_K:
++        // iluvatar port: case GGML_TYPE_Q5_K: not instantiated
+         case GGML_TYPE_Q6_K:
+ // -------------------------------------------------
+-        case GGML_TYPE_IQ1_S:
+-        case GGML_TYPE_IQ2_XXS:
+-        case GGML_TYPE_IQ2_XS:
+-        case GGML_TYPE_IQ2_S:
+-        case GGML_TYPE_IQ3_XXS:
+-        case GGML_TYPE_IQ3_S:
+-        case GGML_TYPE_IQ4_XS:
+-        case GGML_TYPE_IQ4_NL:
++        // iluvatar port: case GGML_TYPE_IQ1_S: not instantiated
++        // iluvatar port: case GGML_TYPE_IQ2_XXS: not instantiated
++        // iluvatar port: case GGML_TYPE_IQ2_XS: not instantiated
++        // iluvatar port: case GGML_TYPE_IQ2_S: not instantiated
++        // iluvatar port: case GGML_TYPE_IQ3_XXS: not instantiated
++        // iluvatar port: case GGML_TYPE_IQ3_S: not instantiated
++        // iluvatar port: case GGML_TYPE_IQ4_XS: not instantiated
++        // iluvatar port: case GGML_TYPE_IQ4_NL: not instantiated
+ // -------------------------------------------------
+-        case GGML_TYPE_MXFP4:
+-        case GGML_TYPE_NVFP4:
++        // iluvatar port: case GGML_TYPE_MXFP4: not instantiated
++        // iluvatar port: case GGML_TYPE_NVFP4: not instantiated
+             mmq_supported = true;
+             break;
+         default:
+@@ -459,8 +477,8 @@
+                     return ne11 <= 128;
+                 case GGML_TYPE_Q6_K:
+                     return ne11 <= (GGML_CUDA_CC_IS_RDNA3_0(cc) ? 128 : 256);
+-                case GGML_TYPE_IQ2_XS:
+-                case GGML_TYPE_IQ2_S:
++                // iluvatar port: case GGML_TYPE_IQ2_XS: not instantiated
++                // iluvatar port: case GGML_TYPE_IQ2_S: not instantiated
+                     return GGML_CUDA_CC_IS_RDNA3_5(cc) || ne11 <= 128;
+                 default:
+                     return true;
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/mmq.cuh /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/mmq.cuh
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/mmq.cuh	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/mmq.cuh	2026-10-11 05:31:14.941744781 +0800
+@@ -284,9 +284,9 @@
+         return ggml_cuda_mmq_get_config_ampere(type, J, fallback);
+     }
+     return ggml_cuda_mmq_get_config_blackwell(type, J, fallback);
+-#elif !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA
++#elif !defined(GGML_USE_MUSA) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_VOLTA
+     return ggml_cuda_mmq_get_config_ampere(type, J, fallback);
+-#elif !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_DP4A
++#elif !defined(GGML_USE_MUSA) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_DP4A
+     return ggml_cuda_mmq_get_config_pascal_dp4a(type, J, fallback);
+ #else
+     return ggml_cuda_mmq_get_config_pascal_older(type, J, fallback);
+@@ -1551,33 +1551,33 @@
+ #define DECL_MMQ_CASE_W4A4(type)                                                   \
+     template void mul_mat_q_case<type, GGML_PREC_Q4>(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) \
+ 
+-extern DECL_MMQ_CASE(GGML_TYPE_Q1_0);
+-extern DECL_MMQ_CASE(GGML_TYPE_Q2_0);
+-extern DECL_MMQ_CASE(GGML_TYPE_Q4_0);
+-extern DECL_MMQ_CASE(GGML_TYPE_Q4_1);
+-extern DECL_MMQ_CASE(GGML_TYPE_Q5_0);
+-extern DECL_MMQ_CASE(GGML_TYPE_Q5_1);
+-extern DECL_MMQ_CASE(GGML_TYPE_Q8_0);
++// iluvatar port: Q1_0 MMQ not instantiated
++// iluvatar port: Q2_0 MMQ not instantiated
++// iluvatar port: Q4_0 MMQ not instantiated
++// iluvatar port: Q4_1 MMQ not instantiated
++// iluvatar port: Q5_0 MMQ not instantiated
++// iluvatar port: Q5_1 MMQ not instantiated
++// iluvatar port: Q8_0 MMQ not instantiated (llc time)
+ // -----------------------------------------
+-extern DECL_MMQ_CASE(GGML_TYPE_Q2_K);
+-extern DECL_MMQ_CASE(GGML_TYPE_Q3_K);
+-extern DECL_MMQ_CASE(GGML_TYPE_Q4_K);
+-extern DECL_MMQ_CASE(GGML_TYPE_Q5_K);
+-extern DECL_MMQ_CASE(GGML_TYPE_Q6_K);
++// iluvatar port: Q2_K MMQ not instantiated
++// iluvatar port: Q3_K MMQ not instantiated (llc time)
++// iluvatar port: Q4_K MMQ not instantiated (llc pathological with dp4a emulation)
++// iluvatar port: Q5_K MMQ not instantiated (llc time)
++// iluvatar port: Q6_K MMQ not instantiated (llc pathological with dp4a emulation)
+ // -----------------------------------------
+-extern DECL_MMQ_CASE(GGML_TYPE_IQ1_S);
+-extern DECL_MMQ_CASE(GGML_TYPE_IQ2_XXS);
+-extern DECL_MMQ_CASE(GGML_TYPE_IQ2_XS);
+-extern DECL_MMQ_CASE(GGML_TYPE_IQ2_S);
+-extern DECL_MMQ_CASE(GGML_TYPE_IQ3_XXS);
+-extern DECL_MMQ_CASE(GGML_TYPE_IQ3_S);
+-extern DECL_MMQ_CASE(GGML_TYPE_IQ4_NL);
+-extern DECL_MMQ_CASE(GGML_TYPE_IQ4_XS);
++// iluvatar port: IQ1_S MMQ not instantiated
++// iluvatar port: IQ2_XXS MMQ not instantiated
++// iluvatar port: IQ2_XS MMQ not instantiated
++// iluvatar port: IQ2_S MMQ not instantiated
++// iluvatar port: IQ3_XXS MMQ not instantiated
++// iluvatar port: IQ3_S MMQ not instantiated
++// iluvatar port: IQ4_NL MMQ not instantiated
++// iluvatar port: IQ4_XS MMQ not instantiated
+ // -----------------------------------------
+ extern DECL_MMQ_CASE(GGML_TYPE_MXFP4);
+ extern DECL_MMQ_CASE(GGML_TYPE_NVFP4);
+-extern DECL_MMQ_CASE_W4A4(GGML_TYPE_MXFP4);
+-extern DECL_MMQ_CASE_W4A4(GGML_TYPE_NVFP4);
++// iluvatar port: MXFP4 W4A4 not instantiated
++// iluvatar port: NVFP4 W4A4 not instantiated
+ 
+ // -------------------------------------------------------------------------------------------------------------------------
+ 
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/mmvq.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/mmvq.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/mmvq.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/mmvq.cu	2026-10-10 17:01:36.639177898 +0800
+@@ -9,7 +9,7 @@
+ // only enabled on DGX Spark, where it is a gain on every type below. On the higher-bandwidth parts the kernel
+ // has little exposed latency left to hide and the extra requests cost more than they save.
+ // For perf data, see https://github.com/ggml-org/llama.cpp/pull/26705#issuecomment-5569335031
+-#if __CUDA_ARCH__ == GGML_CUDA_CC_DGX_SPARK
++#if GGML_CUDA_ARCH_NUM == GGML_CUDA_CC_DGX_SPARK
+ // returns true only for those quants that benefit from prefetch and false otherwise
+ static constexpr __host__ __device__ bool mmvq_should_prefetch(ggml_type type) {
+     switch (type) {
+@@ -112,9 +112,9 @@
+     return MMVQ_PARAMETERS_RDNA2;
+ #elif defined(GCN) || defined(CDNA)
+     return MMVQ_PARAMETERS_GCN;
+-#elif __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA && __CUDA_ARCH__ < GGML_CUDA_CC_AMPERE
++#elif GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_VOLTA && __CUDA_ARCH__ < GGML_CUDA_CC_AMPERE
+     return MMVQ_PARAMETERS_TURING;
+-#elif __CUDA_ARCH__ == GGML_CUDA_CC_DGX_SPARK
++#elif GGML_CUDA_ARCH_NUM == GGML_CUDA_CC_DGX_SPARK
+     return MMVQ_PARAMETERS_GB10;
+ #else
+     return MMVQ_PARAMETERS_GENERIC;
+@@ -440,9 +440,9 @@
+     return get_mmvq_mmid_max_batch_cdna(type);
+ #elif defined(GCN)
+     return get_mmvq_mmid_max_batch_gcn(type);
+-#elif !defined(GGML_USE_MUSA) && (__CUDA_ARCH__ == GGML_CUDA_CC_PASCAL || __CUDA_ARCH__ == GGML_CUDA_CC_VOLTA || __CUDA_ARCH__ >= GGML_CUDA_CC_ADA_LOVELACE)
++#elif !defined(GGML_USE_MUSA) && (GGML_CUDA_ARCH_NUM == GGML_CUDA_CC_PASCAL || GGML_CUDA_ARCH_NUM == GGML_CUDA_CC_VOLTA || GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_ADA_LOVELACE)
+     return MMVQ_MAX_BATCH_SIZE;
+-#elif !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_TURING
++#elif !defined(GGML_USE_MUSA) && GGML_CUDA_ARCH_NUM >= GGML_CUDA_CC_TURING
+     return get_mmvq_mmid_max_batch_turing_plus(type);
+ #else
+     return get_mmvq_mmid_max_batch_pascal_older(type);
+@@ -724,7 +724,7 @@
+         // x block quant index when casting the quants to int
+         const int kqs = vdr * (tid % (qi/vdr));
+ 
+-#if __CUDA_ARCH__ == GGML_CUDA_CC_DGX_SPARK
++#if GGML_CUDA_ARCH_NUM == GGML_CUDA_CC_DGX_SPARK
+         // start the next iterations' weight loads early
+         if constexpr (mmvq_should_prefetch(type)) {
+             constexpr int pf_dist = 2; // loop iterations, not blocks
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/pool1d.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/pool1d.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/pool1d.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/pool1d.cu	2026-10-10 15:59:42.271860109 +0800
+@@ -29,7 +29,7 @@
+ 
+     int count = 0;
+     for (int i = b; i < e; i++) {
+-#if __CUDA_ARCH__ >= 350
++#if GGML_CUDA_ARCH_NUM >= 350
+         float cur = __ldg(i_ptr + i);
+ #else
+         float cur = i_ptr[i];
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/pool2d.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/pool2d.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/pool2d.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/pool2d.cu	2026-10-10 15:59:42.255860265 +0800
+@@ -35,7 +35,7 @@
+ 
+     for (int i = bh; i < eh; i += 1) {
+         for (int j = bw; j < ew; j += 1) {
+-#if __CUDA_ARCH__ >= 350
++#if GGML_CUDA_ARCH_NUM >= 350
+             Ti cur = __ldg(i_ptr + i * iw + j);
+ #else
+             Ti cur = i_ptr[i * iw + j];
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/softmax.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/softmax.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/softmax.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/softmax.cu	2026-10-10 19:06:14.385003266 +0800
+@@ -6,7 +6,7 @@
+ #include <hip/hip_cooperative_groups.h>
+ #else
+ #include <cooperative_groups.h>
+-#include <cooperative_groups/reduce.h>
++// iluvatar port: header missing in CoreX
+ #endif // GGML_USE_HIP
+ 
+ #include <cstdint>
+@@ -152,7 +152,7 @@
+                                                                 const soft_max_params p) {
+     namespace cg = cooperative_groups;
+ 
+-    const cg::grid_group g = cg::this_grid();
++    struct ivx_no_grid_t { __device__ void sync() { __syncthreads(); } }; ivx_no_grid_t g; // iluvatar port: shim, helper unreachable
+ 
+     const int tid               = threadIdx.x;
+     const int col_start         = blockIdx.x * blockDim.x + tid;
+@@ -305,24 +305,7 @@
+     soft_max_f32<true, 0, 0><<<block_nums, block_dims, nbytes_shared, stream>>>(x, mask, sinks, dst, p);
+ }
+ 
+-__launch_bounds__(8*WARP_SIZE, 1) static __global__ void soft_max_f32_parallelize_cols(const float * __restrict__ x,
+-                                                     float * __restrict__ dst,
+-                                                     float * __restrict__ tmp_maxs,
+-                                                     float * __restrict__ tmp_sums,
+-                                                     const soft_max_params p)
+-// We loop over all instead of parallelizing across gridDim.y as cooperative groups
+-// currently only support synchronizing the complete grid if not launched as a cluster group
+-// (which requires CC > 9.0)
+-// https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/device-callable-apis.html#grid-synchronization
+-// https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/device-callable-apis.html#class-cluster-group
+-{
+-    __shared__ float shared_vals[2][32];
+-
+-    for (int rowx = 0; rowx < p.ne01 * p.ne02 * p.ne03; rowx++) {
+-        soft_max_f32_parallelize_cols_single_row(x + int64_t(rowx) * p.ncols, dst + int64_t(rowx) * p.ncols, tmp_maxs,
+-                                                 tmp_sums, shared_vals[0], shared_vals[1], p);
+-    }
+-}
++// iluvatar port: soft_max_f32_parallelize_cols removed (cooperative-groups grid sync unavailable + llc crash); supports_cooperative_launch=false selects fallback
+ 
+ template <typename T>
+ static void soft_max_f32_cuda(const float *                                x,
+@@ -360,9 +343,7 @@
+ 
+             void * kernel_args[] = { (void *) &x, (void *) &dst, (void *) &tmp_maxs_alloc.ptr,
+                                      (void *) &tmp_sums_alloc.ptr, (void *) const_cast<soft_max_params *>(&params) };
+-            CUDA_CHECK(cudaLaunchCooperativeKernel((void *) soft_max_f32_parallelize_cols,
+-                                                   dim3(ggml_cuda_info().devices[id].nsm, 1, 1),
+-                                                   dim3(WARP_SIZE * 8, 1, 1), kernel_args, 0, stream));
++            /* iluvatar port: cooperative launch removed */
+         } else {
+             const size_t nbytes_shared_low = WARP_SIZE * sizeof(float);
+             soft_max_f32<false, 0, 0>
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-iq1_s.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-iq1_s.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-iq1_s.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-iq1_s.cu	2026-10-11 02:59:21.272855818 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_IQ1_S);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-iq2_s.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-iq2_s.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-iq2_s.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-iq2_s.cu	2026-10-11 02:59:21.272855818 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_IQ2_S);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-iq2_xs.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-iq2_xs.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-iq2_xs.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-iq2_xs.cu	2026-10-11 02:59:21.272855818 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_IQ2_XS);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-iq2_xxs.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-iq2_xxs.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-iq2_xxs.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-iq2_xxs.cu	2026-10-11 02:59:21.272855818 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_IQ2_XXS);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-iq3_s.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-iq3_s.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-iq3_s.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-iq3_s.cu	2026-10-11 02:59:21.272855818 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_IQ3_S);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-iq3_xxs.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-iq3_xxs.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-iq3_xxs.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-iq3_xxs.cu	2026-10-11 02:59:21.272855818 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_IQ3_XXS);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-iq4_nl.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-iq4_nl.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-iq4_nl.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-iq4_nl.cu	2026-10-11 02:59:21.272855818 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_IQ4_NL);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-iq4_xs.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-iq4_xs.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-iq4_xs.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-iq4_xs.cu	2026-10-11 02:59:21.272855818 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_IQ4_XS);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-mxfp4.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-mxfp4.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-mxfp4.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-mxfp4.cu	2026-10-11 02:59:21.272855818 +0800
+@@ -1,7 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_MXFP4);
+-
+-DECL_MMQ_CASE_W4A4(GGML_TYPE_MXFP4);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-nvfp4.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-nvfp4.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-nvfp4.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-nvfp4.cu	2026-10-11 02:59:21.272855818 +0800
+@@ -1,7 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_NVFP4);
+-
+-DECL_MMQ_CASE_W4A4(GGML_TYPE_NVFP4);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q1_0.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q1_0.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q1_0.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q1_0.cu	2026-10-11 02:59:21.272855818 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_Q1_0);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q2_0.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q2_0.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q2_0.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q2_0.cu	2026-10-11 02:59:21.272855818 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_Q2_0);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q2_k.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q2_k.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q2_k.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q2_k.cu	2026-10-11 06:30:54.898719895 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_Q2_K);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q3_k.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q3_k.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q3_k.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q3_k.cu	2026-10-11 04:24:19.434660748 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_Q3_K);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q4_0.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q4_0.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q4_0.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q4_0.cu	2026-10-11 02:59:21.272855818 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_Q4_0);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q4_1.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q4_1.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q4_1.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q4_1.cu	2026-10-11 02:59:21.272855818 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_Q4_1);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q4_k.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q4_k.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q4_k.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q4_k.cu	2026-10-11 05:31:14.945744801 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_Q4_K);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q5_0.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q5_0.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q5_0.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q5_0.cu	2026-10-11 02:59:21.272855818 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_Q5_0);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q5_1.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q5_1.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q5_1.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q5_1.cu	2026-10-11 02:59:21.272855818 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_Q5_1);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q5_k.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q5_k.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q5_k.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q5_k.cu	2026-10-11 04:24:19.434660748 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_Q5_K);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q6_k.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q6_k.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q6_k.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q6_k.cu	2026-10-11 05:31:14.945744801 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_Q6_K);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q8_0.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q8_0.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/template-instances/mmq-instance-q8_0.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/template-instances/mmq-instance-q8_0.cu	2026-10-11 04:24:19.434660748 +0800
+@@ -1,5 +0,0 @@
+-// This file has been autogenerated by generate_cu_files.py, do not edit manually.
+-
+-#include "../mmq.cuh"
+-
+-DECL_MMQ_CASE(GGML_TYPE_Q8_0);
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/vendors/hip.h /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/vendors/hip.h
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/vendors/hip.h	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/vendors/hip.h	2026-10-10 17:01:36.647177780 +0800
+@@ -149,7 +149,7 @@
+ #define cudaOccupancyMaxActiveBlocksPerMultiprocessor hipOccupancyMaxActiveBlocksPerMultiprocessor
+ #define cudaFuncSetAttribute hipFuncSetAttribute
+ #define cudaFuncAttributeMaxDynamicSharedMemorySize hipFuncAttributeMaxDynamicSharedMemorySize
+-#define __trap() do { abort(); __builtin_unreachable(); } while(0)
++#define ((void)0) do { abort(); __builtin_unreachable(); } while(0)
+ #define CUBLAS_STATUS_SUCCESS HIPBLAS_STATUS_SUCCESS
+ #define CUBLAS_STATUS_NOT_INITIALIZED HIPBLAS_STATUS_NOT_INITIALIZED
+ #define CUBLAS_STATUS_ALLOC_FAILED HIPBLAS_STATUS_ALLOC_FAILED
+Only in /root/llama-deploy/llama.cpp: llama.cpp-master

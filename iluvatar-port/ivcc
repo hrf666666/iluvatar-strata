@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# ivcc — CoreX clang CUDA-compiler wrapper for CMake CUDA language (GGML_CUDA).
+# v2 (2026-10-10): force -O1 instead of -O0.
+#   -O0 leaves CoreX's `static __inline__` device fp16 helpers un-inlined;
+#   the resulting RPCMOV/PCSWAP device-call sequences raise XID-22 illegal
+#   instruction interrupts on BI-V150 and permanently wedge the GPU channel.
+#   -O1 inlines them (SASS verified: zero call sequences, native F2F.F16
+#   conversions) and avoids the -O3 llc optimizer crashes.
+#   Drop incoming -O* flags; -O1 as the LAST flag wins.
+COREX=/usr/local/corex-4.4.0
+REAL=$COREX/bin/clang++
+COMPAT=/usr/local/bin/corex_compat.h
+
+args=()
+has_c=0
+for a in "$@"; do
+  case "$a" in
+    *.cu|*.cpp|*.cc|*.c|*.cxx) args+=("$a") ;;
+    -c)                        has_c=1; args+=("$a") ;;
+    -x\ cuda)                  args+=(-x ivcore) ;;
+    -O*)                       ;;
+    --cuda-gpu-arch=*)         ;;
+    --generate-code*|-gencode*|-arch=*) ;;
+    -extended-lambda|--extended-lambda|--expt-*-lambda|-use_fast_math|--use_fast_math) ;;
+    *)                         args+=("$a") ;;
+  esac
+done
+
+cmd=(nice -n 5 "$REAL" -std=c++17 -DGGML_CUDA_ARCH_NUM=710 -DGGML_ILUVATAR_NO_DP4A \
+     -include "$COMPAT" \
+     --cuda-gpu-arch=ivcore11 --cuda-path=$COREX --no-cuda-version-check \
+     -I$COREX/include "${args[@]}" -O1)
+
+if [ $has_c -eq 0 ]; then
+  cmd+=(-L$COREX/lib64 -Wl,-rpath,$COREX/lib64 -L/usr/local/iluvatar/lib64 -Wl,-rpath,/usr/local/iluvatar/lib64 -lcudart -lcublas -lcurand -lcuda -lixthunk -lixml)
+fi
+
+exec "${cmd[@]}"
