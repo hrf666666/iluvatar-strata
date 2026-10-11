@@ -257,3 +257,49 @@ open levers, in order of expected yield:
 3. **Pool-free window**: a `--spec` path that refuses the residency table is
    already escaped by `STRATA_DBG_PLAIN`; wiring it through the verify window
    (instead of the token loop) would allow live execution.
+
+## 15. Performance pass: dp4a restored, MMQ back, 18.2x aggregate (2026-10-12)
+
+**dp4a.** The blanket disable (`-DGGML_ILUVATAR_NO_DP4A` in ivcc, plus the
+guard change in `common.cuh`) was only half right: the bi assembler rejects
+the *inline PTX* form (`asm("dp4a.s32.s32.s32.s32 …")` — "invalid operand"),
+but the `__dp4a()` **intrinsic** lowers to working hardware INT8 dot-product
+instructions, verified bit-exact against a scalar reference on device. With
+the intrinsic path enabled everywhere:
+
+- decode (batch=1, Q4_K_M): 9.2 → **11.4 tok/s** (GPU util 0% → 91–100%)
+- prefill: 39.6 → 199.5–232.5 tok/s once MMQ came back (below)
+
+**MMQ.** The original reason MMQ was compiled out ("llc pathological
+compile times with dp4a emulation") vanished with hardware dp4a: `mmq.cu`
+and all 22 `template-instances/mmq-instance-*.cu` are now **byte-identical
+to upstream** (pure revert of the port's compile-out). Prompt-time quantized
+matmul no longer detours through dequant+cuBLAS: prefill 39.6 → **232.5 tok/s**
+(5.9x).
+
+**Bandwidth wall, measured.** A 16 GB device-scan kernel gives ~245 GB/s
+usable per card. 27B Q4_K_M = 16.2 GB read per token at batch=1 → hard
+ceiling ~15.3 tok/s; 11.4 achieved = 75% efficiency. `-O2/-O3` on
+representative kernels: no measurable difference (launch/memory bound).
+4-GPU `--tensor-split` at batch=1: **no decode gain** (11.2 tok/s — the
+layer pipeline is sequential, per-card bandwidth does not aggregate).
+
+**Batch aggregation.** `-np N` concurrent sequences read the weights once
+per step and emit N tokens:
+
+| np | aggregate tok/s (1 card) | per-seq |
+|---|---|---|
+| 1 | 11.4 | 11.4 |
+| 8 | 18.5 | 2.31 |
+| 16 | 22.7 | 1.42 |
+| 32 | 32.5 | 1.02 |
+| 64 | **46.3** | 0.73 |
+
+np=64 with `-c 32768` (512/slot) fits in 30.1/32.7 GB.
+
+**Multi-instance.** One server per card (healthy 3,4,6,7), each `-np 64`:
+256 concurrent requests × 64 tokens → 16384 tokens in 97.9 s =
+**167.4 tok/s aggregate** (41.8 per card, perfectly linear). That is
+**18.2x** the 9.2 tok/s single-stream baseline. Launcher:
+`iluvatar-port/serve-parallel.sh`. Raw log:
+`docs/evidence/perf-optimization.log`.

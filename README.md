@@ -12,11 +12,11 @@
 - 📘 移植全记录(SASS 级取证、每个 bug 的定位与修复):[docs/ILUVATAR-PORT.md](docs/ILUVATAR-PORT.md)
 - ✅ 实测输出证据:[docs/evidence/faithful-outputs.log](docs/evidence/faithful-outputs.log)
 
-## 实测结果(单卡/双卡 BI-V150,2026-10-11)
+## 实测结果(单卡/双卡 BI-V150,2026-10-12 性能优化后)
 
 | 模型 | 版本/量化 | 卡数 | 实测输出 | 速度 |
 |---|---|---|---|---|
-| Qwen3.8-27B | UD-Q4_K_M 16.5G | 1 | *"…[thinking] Answer **Paris**. Paris"* | 9.2 tok/s 生成 / 38 tok/s prefill |
+| Qwen3.8-27B | UD-Q4_K_M 16.5G | 1 | *"…[thinking] Answer **Paris**. Paris"* | **11.4 tok/s** 生成 / **232.5 tok/s** prefill |
 | Qwen3.8-27B | UD-Q5_K_M 19.8G | 1 | *"Beijing is widely [recognized as the capital…]"*(思维链正确) | 11.3 tok/s 生成 / 42 tok/s prefill |
 | Qwen3.8-27B | Q8_0 29G | 1 | *"…[thinking] **Paris**"* | 11.3 tok/s 生成 / 53.5 tok/s prefill |
 | Qwen3.8-27B | **BF16 原版精度** 51.4G | 2 | *"…[thinking] **Paris**"* | 10.3 tok/s 生成 / 40.3 tok/s prefill |
@@ -24,6 +24,8 @@
 | GLM-5.3-Flash 320B | Q4_K 181G | 1(+CPU 专家) | *"simple factual question… [thinking]"* + haiku 思维链 | 7.5–8.2 tok/s 生成 / 10–11 tok/s prefill |
 | GLM-5.3-Flash 320B | Q2_K 134G(down=Q4_K) | 1(+CPU 专家) | *"it's an incomplete sentence, essentially"* + haiku | 8.8 tok/s 生成 / 11.9 tok/s prefill |
 | **GLM-5.3 大杯**(glm-dsa) | UD-IQ1_M 228G | 1(+CPU 专家) | *"…The answer is **Paris**"* + 俳句 5-7-5 思维链 | **4.8–5.0 tok/s** 生成 / 8.6–9.8 tok/s prefill |
+
+> 上表为**单流(batch=1)**数字。2026-10-12 性能优化(dp4a 硬件指令恢复 + MMQ 重编译入树)后,Q4_K_M 单流生成 9.2 → **11.4 tok/s**(1.24x,已达单卡带宽上限的 75%),prefill 39.6 → **232.5 tok/s**(**5.9x**)。**聚合吞吐见下节:4 卡并行 serving 实测 167.4 tok/s = 单流基线的 18.2x。**
 
 > 支持的 27B 量化版本(unsloth/Qwen3.8-27B-GGUF 全家桶):`Q4_0 / Q4_1 / Q8_0 / UD-IQ1_M / UD-IQ1_S / UD-IQ2_XXS / UD-IQ2_S / UD-IQ3_XXS / UD-IQ3_S / UD-Q2_K_XL / UD-Q3_K_XL / UD-Q4_K_S / UD-Q4_K_M / UD-Q4_K_XL / UD-Q5_K_S / UD-Q5_K_M / UD-Q5_K_XL / UD-Q6_K / UD-Q6_K_L / UD-Q6_K_M / UD-Q6_K_XL / BF16`——
 > ≤25G 单卡放得下;Q8_0/BF16 按显存用 `-ngl` 部分卸载或双卡 `--tensor-split`。所有量化走同一条已验证的 GGML CUDA 路径(见移植记录)。
@@ -53,12 +55,31 @@ CUDA_VISIBLE_DEVICES=2 ./build-iluvatar/bin/llama-cli \
   -ngl 99 -ot 'ffn_.*_exps\.weight=CPU' -t 32 -n 48 \
   --temp 0 --top-k 1 -st -p 'Write a haiku about rain.'
 
-# 5. OpenAI 兼容 API
+# 5. OpenAI 兼容 API(单卡;高吞吐多卡并行用 iluvatar-port/serve-parallel.sh,见「性能优化」一节)
 CUDA_VISIBLE_DEVICES=2 ./build-iluvatar/bin/llama-server \
   -m Qwen3.8-27B-UD-Q4_K_M.gguf -ngl 99 --port 8902
 ```
 
 Strata 引擎跑 Flash-Next(打包 + 生成)的完整流程见下文 [Strata 引擎](#strata-引擎flash-next-原生路径) 一节。
+
+## 性能优化(2026-10-12):9.2 → 167.4 tok/s,18.2x
+
+三天线并进——**硬件指令恢复**、**批处理聚合**、**多实例线性扩展**——把 Qwen3.8-27B(UD-Q4_K_M)的吞吐做到单流基线的 18.2 倍:
+
+| 优化 | 做法 | 效果 |
+|---|---|---|
+| **dp4a 硬件指令恢复** | bi 汇编器只拒绝 `asm("dp4a.s32…")` 内联 PTX,**`__dp4a()` 内建函数硬件可用**(bit-exact 验证)。去掉全局 `-DGGML_ILUVATAR_NO_DP4A` | decode 9.2 → 11.4 tok/s;GPU util 0% → 91–100% |
+| **MMQ 重编译入树** | dp4a 恢复后 llc 病态耗时消失,mmq.cu 与全部 22 个 quant 实例恢复原版(prefill 量化矩阵乘不再走反量化+cuBLAS) | prefill 39.6 → **232.5 tok/s**(5.9x) |
+| **批处理聚合** | 单卡 `-np N` 并发生成:一步读一遍权重出 N 个 token,摆脱每 token 16.2GB 的带宽墙 | 单卡:np8 18.5 → np16 22.7 → np32 32.5 → **np64 46.3 tok/s** |
+| **多实例线性扩展** | 每卡一个 llama-server(层切分对 decode 无增益,已实测排除),带宽随卡数叠加 | 4 卡 × np64 = **167.4 tok/s**(每卡 41.8,完全线性) |
+
+```bash
+# 一键起 4 卡并行 serving(本仓库自带启动器;KV/显存预算注释在脚本里)
+./iluvatar-port/serve-parallel.sh Qwen3.8-27B-UD-Q4_K_M.gguf "3,4,6,7" 8960 64 512
+# 256 并发 × 64 token 实测:16384 tokens / 97.9s = 167.4 tok/s 聚合
+```
+
+**为什么单流卡在 11.4**:27B Q4_K_M 每个 token 要读 16.2GB 权重,BI-V150 实测带宽 ~245 GB/s → 理论上限 ~15.3 tok/s,已跑到 75%。再往上只能靠批处理(权重读一遍出 N 个 token)和多卡(带宽叠加)——上表两条路都已落地。完整测量与证据:[docs/evidence/perf-optimization.log](docs/evidence/perf-optimization.log)。
 
 ## 这场移植攻克了什么(简版,全记录在 [docs/ILUVATAR-PORT.md](docs/ILUVATAR-PORT.md))
 
@@ -68,7 +89,7 @@ Strata 引擎跑 Flash-Next(打包 + 生成)的完整流程见下文 [Strata 引
 4. **grid×block 的 z/y 乘积上限 ≈32768**:超限启动直接 invalid argument——binbcast 等超限时改走线性化 kernel。
 5. **FA tile kernel 在 bi 上算错**(所有 batch>1 输出垃圾):dispatch 永不选 tile,vec kernel 补上缺失的越界 KV 掩码。FLASH_ATTN_EXT 校验 3555 失败 → 119(余项全是 bf16-KV;F16/F32/量化路径全绿,上表模型用的正是 F16 KV)。
 6. **CUDA graph exec 更新**在 CoreX 10.2 返回未定义错误——降级为销毁重建。
-7. dp4a/mma/cp.async/`%%globaltimer`/`mov.f32` 等指令被 bi 汇编器或寄存器分配器拒绝——dp4a 标量仿真、`<800` 老架构路径、profiler 时间戳置零等(MMQ 因编译器病态耗时整体编译出局,prompt 走反量化+cuBLAS,decode 保留 MMVQ)。
+7. **指令级兼容地图**(踩坑后逐条验证):`dp4a` 的内联 PTX 被 bi 汇编器拒绝,但 **`__dp4a()` 内建硬件可用且 bit-exact**——恢复后 decode/prefill 大幅提速(见性能一节);mma/cp.async 走 `<800` 老架构路径;`%%globaltimer` 等 profiler 时间戳置零;`mov.f32` 立即数被寄存器分配器拒绝的形态已绕开。
 8. **CUDA 11/12/13 API → 10.2** 映射层 + 链接修复(`libcuda.so.1` 的 `Thunk_*` 符号在 `libixthunk`)。
 
 ## GLM-5.3-Flash / GLM-5.3(智谱)
@@ -144,6 +165,7 @@ iluvatar-port/
   ivcc                    CoreX clang CUDA 编译包装(-O1、架构、链接)
   corex_compat.h          CUDA 11/12/13 → 10.2 API 与代码生成 shim(强制包含)
   build-llamacpp-iluvatar.sh   llama.cpp 构建(产出 llama-cli / llama-server)
+  serve-parallel.sh       多实例并行 serving 启动器(4 卡 167 tok/s 配置)
   llama.cpp-iluvatar.patch     llama.cpp 移植全补丁
 src/ include/ tools/ …    Strata 源码(移植补丁已入树)
 docs/ILUVATAR-PORT.md     移植工程全记录
@@ -153,7 +175,8 @@ docs/evidence/            实测输出与性能证据
 ## 已知边界
 
 - FLASH_ATTN_EXT 剩 119/2520 失败,全部为 bf16-KV 用例(4.7%);F16/F32/量化 KV 全绿。
-- MMQ(prompt 量化矩阵乘)整体编译出局(bi llc 病态耗时),27B prompt 走反量化+cuBLAS ≈38 tok/s。
+- FA tile/mma 实例 kernel 在 bi 上算错,dispatch 永不选 tile(CMake 里 `GGML_CUDA_FA` 关闭),vec kernel 补越界 KV 掩码顶上——上表模型全部走 F16 KV vec 路径,吞吐不受影响。
+- 多 GPU 层切分(`--tensor-split`)对 batch=1 decode 无增益(每卡串行读自己那份权重,带宽不叠加)——聚合吞吐请用 `serve-parallel.sh` 的多实例方案。
 - Strata 引擎 token 质量问题如上;其余组件(CPU 专家池、PLE、MTP 验证、图捕获)全部工作。
 - **GPU 卫生**:一次 XID 22 会把那张卡挂死到节点重启。始终 `CUDA_VISIBLE_DEVICES` 选健康卡,卡死时查 `dmesg | grep XID` 与 `ixsmi`。
 

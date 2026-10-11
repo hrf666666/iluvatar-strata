@@ -26,7 +26,7 @@ for a in "$@"; do
   esac
 done
 
-cmd=(nice -n 5 "$REAL" -std=c++17 -DGGML_CUDA_ARCH_NUM=710 -DGGML_ILUVATAR_NO_DP4A \
+cmd=(nice -n 5 "$REAL" -std=c++17 -DGGML_CUDA_ARCH_NUM=710 \
      -include "$COMPAT" \
      --cuda-gpu-arch=ivcore11 --cuda-path=$COREX --no-cuda-version-check \
      -I$COREX/include "${args[@]}" -O1)

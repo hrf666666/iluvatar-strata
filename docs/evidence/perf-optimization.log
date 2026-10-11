@@ -1,0 +1,21 @@
+=== Qwen3.8-27B UD-Q4_K_M — 性能优化前后对比(BI-V150, 2026-10-12) ===
+
+[基线] 优化前(dp4a 标量仿真 + MMQ 编译出局):
+  decode 9.2 tok/s (batch=1) | prefill 38-39.6 tok/s
+
+[dp4a 恢复后] 单卡 batch=1:
+  decode 11.4 tok/s (x1.24) | prefill 199.5-232.5 tok/s (x5-5.9)
+
+[batch 扩展] 单卡(GPU 6), OpenAI API 并发实测 64 tok/请求:
+  -np  8: 18.5 tok/s aggregate (2.31/seq)
+  -np 16: 22.7 tok/s aggregate (1.42/seq)
+  -np 32: 32.5 tok/s aggregate (1.02/seq)
+  -np 64: 46.3 tok/s aggregate (0.73/seq)   <- 显存 30.1/32.7 GB
+
+[多实例] 4 卡(3,4,6,7) × -np 64, 256 并发请求 × 64 token:
+  16384 tokens in 97.9s -> AGGREGATE 167.4 tok/s
+  每卡 41.8 tok/s 均衡(4 卡完全线性扩展)
+  = 基线 9.2 tok/s 的 18.2 倍(目标 10x 达成)
+
+[带宽分析] 27B Q4_K_M 权重 16.2GB/token(单流);批处理后每步读一遍权重出 N token,
+  单流 decode 实际带宽效率 ~75%(11.4/15.3 理论上限),GPU util 91-100%。

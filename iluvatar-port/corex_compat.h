@@ -29,14 +29,20 @@ inline cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event) {
 //      ambiguity with the header templates; 4-arg width forms forward to the
 //      real builtins (32-bit types only in those call sites). ----------------
 #if defined(__CUDACC__)
-__device__ __forceinline__ unsigned bi_shfl_up_u32(unsigned m, unsigned v, int d) { return __shfl_up_sync(m, v, d); }
-__device__ __forceinline__ unsigned bi_shfl_down_u32(unsigned m, unsigned v, int d) { return __shfl_down_sync(m, v, d); }
-__device__ __forceinline__ unsigned bi_shfl_xor_u32(unsigned m, unsigned v, int d) { return __shfl_xor_sync(m, v, d); }
-__device__ __forceinline__ unsigned bi_shfl_idx_u32(unsigned m, unsigned v, int s) { return __shfl_sync(m, v, s); }
+// width=32 forwarding primitives. The bi hardware warp is 64 lanes, so the
+// DEFAULT shuffle width is 64: an absolute-lane `__shfl_sync(m, v, 0)`
+// broadcast reads lane 0 of the 64-lane warp and gives every OTHER 32-lane
+// group that group's value (verified: adjacent 32-groups collapse pairwise).
+// The 4-argument width=32 form is exact, so EVERY 3-arg shuffle is routed
+// through it.
 __device__ __forceinline__ unsigned bi_shfl_up_u32w(unsigned m, unsigned v, int d, int w) { return __shfl_up_sync(m, v, d, w); }
 __device__ __forceinline__ unsigned bi_shfl_down_u32w(unsigned m, unsigned v, int d, int w) { return __shfl_down_sync(m, v, d, w); }
 __device__ __forceinline__ unsigned bi_shfl_xor_u32w(unsigned m, unsigned v, int d, int w) { return __shfl_xor_sync(m, v, d, w); }
 __device__ __forceinline__ unsigned bi_shfl_idx_u32w(unsigned m, unsigned v, int s, int w) { return __shfl_sync(m, v, s, w); }
+__device__ __forceinline__ unsigned bi_shfl_up_u32(unsigned m, unsigned v, int d) { return bi_shfl_up_u32w(m, v, d, 32); }
+__device__ __forceinline__ unsigned bi_shfl_down_u32(unsigned m, unsigned v, int d) { return bi_shfl_down_u32w(m, v, d, 32); }
+__device__ __forceinline__ unsigned bi_shfl_xor_u32(unsigned m, unsigned v, int d) { return bi_shfl_xor_u32w(m, v, d, 32); }
+__device__ __forceinline__ unsigned bi_shfl_idx_u32(unsigned m, unsigned v, int s) { return bi_shfl_idx_u32w(m, v, s, 32); }
 __device__ __forceinline__ unsigned long long bi_p64(unsigned hi, unsigned lo) { return ((unsigned long long) hi << 32) | lo; }
 
 // 3-arg overloads
