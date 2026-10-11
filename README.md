@@ -23,6 +23,7 @@
 | Qwen3.8-Flash-Next 125B | GSQ-RCO IQ2_XS 68G | 1(+CPU 专家) | 俳句创作逐词数音节 | 9.0 tok/s 生成 / 15.8 tok/s prefill |
 | GLM-5.3-Flash 320B | Q4_K 181G | 1(+CPU 专家) | *"simple factual question… [thinking]"* + haiku 思维链 | 7.5–8.2 tok/s 生成 / 10–11 tok/s prefill |
 | GLM-5.3-Flash 320B | Q2_K 134G(down=Q4_K) | 1(+CPU 专家) | *"it's an incomplete sentence, essentially"* + haiku | 8.8 tok/s 生成 / 11.9 tok/s prefill |
+| **GLM-5.3 大杯**(glm-dsa) | UD-IQ1_M 228G | 1(+CPU 专家) | *"…The answer is **Paris**"* + 俳句 5-7-5 思维链 | **4.8–5.0 tok/s** 生成 / 8.6–9.8 tok/s prefill |
 
 > 支持的 27B 量化版本(unsloth/Qwen3.8-27B-GGUF 全家桶):`Q4_0 / Q4_1 / Q8_0 / UD-IQ1_M / UD-IQ1_S / UD-IQ2_XXS / UD-IQ2_S / UD-IQ3_XXS / UD-IQ3_S / UD-Q2_K_XL / UD-Q3_K_XL / UD-Q4_K_S / UD-Q4_K_M / UD-Q4_K_XL / UD-Q5_K_S / UD-Q5_K_M / UD-Q5_K_XL / UD-Q6_K / UD-Q6_K_L / UD-Q6_K_M / UD-Q6_K_XL / BF16`——
 > ≤25G 单卡放得下;Q8_0/BF16 按显存用 `-ngl` 部分卸载或双卡 `--tensor-split`。所有量化走同一条已验证的 GGML CUDA 路径(见移植记录)。
@@ -81,7 +82,13 @@ CUDA_VISIBLE_DEVICES=2 ./build-iluvatar/bin/llama-cli \
   --temp 0 --top-k 1 -st -p 'The capital of France is'
 ```
 
-- **Q4_K / Q2_K 均忠实输出**(证据:[docs/evidence/glm53-flash.log](docs/evidence/glm53-flash.log))。
+- **GLM-5.3-Flash:Q4_K / Q2_K 均忠实输出**;**GLM-5.3 大杯(glm-dsa, UD-IQ1_M 228G)同样跑通**——"The answer is Paris"、俳句 5-7-5 思维链,4.8–5.0 tok/s(证据:[docs/evidence/glm53-flash.log](docs/evidence/glm53-flash.log)):
+
+```bash
+CUDA_VISIBLE_DEVICES=3 ./build-iluvatar/bin/llama-cli \
+  -m GLM-5.3-UD-IQ1_M-00001-of-00006.gguf --cpu-moe -ngl 99 -c 4096 -t 48 \
+  --temp 0 --top-k 1 -st -p 'The capital of France is'
+```
 - **Q2_K_S(纯 2-bit)上游量化本身退化**——同一权重在纯 CPU(llama.cpp 官方 CPU 后端)上输出同样的复读,与天数 GPU 移植无关,已如实记录。
 - bf16 KV/indexer 路径的 bi 兼容修复包含在补丁里(BF16 → F16 转换回退,见移植记录)。
 
