@@ -452,7 +452,7 @@ diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp
  #pragma unroll
 diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/fattn.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/fattn.cu
 --- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/fattn.cu	2026-10-10 14:15:42.000000000 +0800
-+++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/fattn.cu	2026-10-11 08:18:52.765835646 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/fattn.cu	2026-10-11 12:51:10.031069478 +0800
 @@ -161,7 +161,7 @@
          // a sparse variant at the full tile width gathers the union of its queries once, prefer it for large batches
          constexpr bool has_wide_sparse = ggml_cuda_flash_attn_ext_mma_f16_may_use_sparse(DKQ, DV, 64/ncols2, ncols2);
@@ -492,7 +492,24 @@ diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp
  }
  
  template <int DKQ, int DV>
-@@ -632,7 +632,10 @@
+@@ -498,7 +498,15 @@
+     const ggml_tensor * K = dst->src[1];
+     const ggml_tensor * V = dst->src[2];
+ 
+-    fattn_vec_case_t vec_case = ggml_cuda_get_fattn_vec_case(Q->ne[0], K->type, V->type);
++    // iluvatar port: the bf16 vec kernels miscompute on BI-V150 (bf16 K dot +
++    // width-8 reduction compiles wrong). Returning nullptr sends the caller
++    // through the existing "convert K/V to f16" fallback, which is exact.
++    fattn_vec_case_t vec_case;
++    if (K->type == GGML_TYPE_BF16 || V->type == GGML_TYPE_BF16) {
++        vec_case = nullptr;
++    } else {
++        vec_case = ggml_cuda_get_fattn_vec_case(Q->ne[0], K->type, V->type);
++    }
+     if (vec_case == nullptr) {
+         static bool warned = false;
+         if (!warned) {
+@@ -632,7 +640,10 @@
  
      // For small batch sizes the vector kernel may be preferable over the kernels optimized for large batch sizes:
      // 192 satisfies % 64 == 0 but has no vec instance (DKQ != DV); force it onto the MMA path.
@@ -504,7 +521,7 @@ diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp
  
      // If Turing tensor cores are available, use them:
      if (turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
-@@ -674,10 +677,13 @@
+@@ -674,10 +685,13 @@
          if (can_use_vector_kernel && Q->ne[1] * gqa_ratio_eff <= 2) {
              return BEST_FATTN_KERNEL_VEC;
          }
@@ -521,7 +538,7 @@ diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp
      }
  
      // AMD MFMA needs a certain minimum batch size to outscale the tile kernel for large head sizes.
-@@ -716,7 +722,11 @@
+@@ -716,7 +730,11 @@
              }
          }
      }
@@ -576,6 +593,67 @@ diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp
      }
  }
  #endif // USE_CUDA_GRAPH
+diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/lightning-indexer.cu /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/lightning-indexer.cu
+--- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/lightning-indexer.cu	2026-10-10 14:15:42.000000000 +0800
++++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/lightning-indexer.cu	2026-10-11 13:01:12.489682016 +0800
+@@ -552,14 +552,14 @@
+ }
+ 
+ #define LIGHTNING_INDEXER_CASE(lightning_indexer_kernel, n_embd, n_head, K, type_K)         \
+-    if (K->type == (type_K)) {                                                              \
++    if (k_type_eff == (type_K)) {                                                              \
+         lightning_indexer_kernel<WARPS_PER_BLOCK, K_VECS_PER_BLOCK, n_embd, n_head, type_K> \
+             <<<grid, block, 0, ctx.stream()>>>(                                             \
+             q_d, k_d, w_d, m_d, dst_d,                                                      \
+             n_stream, n_batch, n_kv,                                                        \
+             nb1, nb2, nb3,                                                                  \
+             nbq1, nbq2, nbq3,                                                               \
+-            nbk1, nbk2, nbk3,                                                               \
++            nbk1_eff, nbk2_eff, nbk3_eff,                                                               \
+             nbw1, nbw2, nbw3,                                                               \
+             nbm1, nbm2, nbm3,                                                               \
+             nem3                                                                            \
+@@ -607,13 +607,39 @@
+     const int n_kv     = k->ne[2];
+ 
+     const float *   q_d = (const float *)   q->data;
+-    const char  *   k_d = (const char  *)   k->data;
++    // iluvatar port: the BF16 indexer kernels miscompute on BI-V150 (the
++    // bf16 K dot + sub-warp width-8 reduction combination compiles to garbage
++    // or an illegal instruction). Convert BF16 K to F16 and run the (exact)
++    // F16 kernels instead.
++    ggml_cuda_pool_alloc<half> k_f16(ctx.pool());
++    const char * k_d = (const char *) k->data;
++    size_t nbk1_eff = nbk1, nbk2_eff = nbk2, nbk3_eff = nbk3;
++    if (k->type == GGML_TYPE_BF16) {
++        const size_t nek2x3 = nek2*nek3;
++        k_f16.alloc(ggml_nelements(k));
++        const size_t bs = ggml_blck_size(k->type);
++        const size_t ts = ggml_type_size(k->type);
++        if (ggml_is_contiguous(k)) {
++            const to_fp16_cuda_t to_fp16 = ggml_get_to_fp16_cuda(GGML_TYPE_BF16);
++            to_fp16(k->data, k_f16.ptr, ggml_nelements(k), ctx.stream());
++        } else {
++            const to_fp16_nc_cuda_t to_fp16_nc = ggml_get_to_fp16_nc_cuda(GGML_TYPE_BF16);
++            to_fp16_nc(k->data, k_f16.ptr, nek0, nek1, nek2, nek3, nbk1/ts, nbk2/ts, nbk3/ts, ctx.stream());
++        }
++        k_d = (const char *) k_f16.ptr;
++        nbk1_eff = nek0 * sizeof(half);
++        nbk2_eff = nek1 * nbk1_eff;
++        nbk3_eff = nek2 * nbk2_eff;
++        GGML_UNUSED(bs);
++    }
+     const float *   w_d = (const float *)   w->data;
+     const half  *   m_d = (const half  *)   m->data;
+     float       * dst_d = (      float *) dst->data;
+ 
+     const int device = ggml_cuda_get_device();
+     const int cc     = ggml_cuda_info().devices[device].cc;
++    // iluvatar port: BF16 K was converted to F16 above - dispatch on the effective type
++    const ggml_type k_type_eff = k->type == GGML_TYPE_BF16 ? GGML_TYPE_F16 : k->type;
+ 
+     if (n_embd == 128 && n_head == 64) {
+ #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
 diff -ru '--exclude=build-iluvatar' '--exclude=*.orig' /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/mma.cuh /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/mma.cuh
 --- /tmp/llama-orig/llama.cpp-master/ggml/src/ggml-cuda/mma.cuh	2026-10-10 14:15:42.000000000 +0800
 +++ /root/llama-deploy/llama.cpp/ggml/src/ggml-cuda/mma.cuh	2026-10-10 15:59:42.259860226 +0800
