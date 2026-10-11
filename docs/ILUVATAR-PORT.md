@@ -225,3 +225,15 @@ parameter-passing root cause and the ~12-window lifetime remain open.
   capture. Next lever: capture-free window execution (needs a driver without
   the doorbell-in-graph constraint) or per-node parameter comparison between
   capture and replay.
+
+
+## 13. Direct-window experiment result (same session)
+
+`STRATA_DBG_DIRECT_WINDOW=1` (in the tree, env-gated) replaces the graph
+launch with a live `record_window` call — the clean A/B for "graph machinery
+vs kernel". It **hangs**: the live path's doorbell wait never completes
+because the CPU expert pool is only released by the GPU ring that the
+*replay* protocol drives. A working variant needs the pool disabled end-to-end,
+which the native-pack `--spec` path refuses. The experiment knob stays in the
+tree for a follow-up with a pool-free window; the T≥2 root cause remains
+between the ~19 multi-token nodes and their capture parameters.
