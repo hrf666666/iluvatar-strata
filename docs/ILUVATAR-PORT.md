@@ -237,3 +237,23 @@ because the CPU expert pool is only released by the GPU ring that the
 which the native-pack `--spec` path refuses. The experiment knob stays in the
 tree for a follow-up with a pool-free window; the T≥2 root cause remains
 between the ~19 multi-token nodes and their capture parameters.
+
+
+## 14. Probing boundary found (same session, final)
+
+Any instrumentation between the graph launch and the commit/doorbell machinery
+(a `cudaStreamSynchronize` + host copy of R_, or the live-window knob) stalls
+the CPU expert pool at its doorbell futex — the pool is only released by the
+GPU ring that the replay protocol itself drives. Black-box probing of the
+window interior is therefore **structurally blocked** on this engine. The three
+open levers, in order of expected yield:
+
+1. **Device-side NaN sentinels**: append a per-layer check kernel into the
+   captured graph writing to a persistent counter buffer (adds nodes but does
+   not touch the pool protocol).
+2. **Node parameter diff**: `cudaGraphKernelNodeGetParams` over
+   `STRATA_VERIFY_NODES`-dumped nodes, comparing captured params against the
+   post-`refresh_ar`/`capture_commit` state for T=2 vs T=1.
+3. **Pool-free window**: a `--spec` path that refuses the residency table is
+   already escaped by `STRATA_DBG_PLAIN`; wiring it through the verify window
+   (instead of the token loop) would allow live execution.
