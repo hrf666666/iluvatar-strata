@@ -17,9 +17,9 @@
 | 模型 | 版本/量化 | 卡数 | 实测输出 | 速度 |
 |---|---|---|---|---|
 | Qwen3.8-27B | UD-Q4_K_M 16.5G | 1 | *"…[thinking] Answer **Paris**. Paris"* | 9.2 tok/s 生成 / 38 tok/s prefill |
-| Qwen3.8-27B | UD-Q5_K_M 19.8G | 1 | 见下方验证表 | — |
-| Qwen3.8-27B | Q8_0 29G | 1 | 见下方验证表 | — |
-| Qwen3.8-27B | BF16(原版精度)54.7G | 2 | 见下方验证表 | — |
+| Qwen3.8-27B | UD-Q5_K_M 19.8G | 1 | *"Beijing is widely [recognized as the capital…]"*(思维链正确) | 11.3 tok/s 生成 / 42 tok/s prefill |
+| Qwen3.8-27B | Q8_0 29G | 1 | *"…[thinking] **Paris**"* | 11.3 tok/s 生成 / 53.5 tok/s prefill |
+| Qwen3.8-27B | **BF16 原版精度** 51.4G | 2 | *"…[thinking] **Paris**"* | 10.3 tok/s 生成 / 40.3 tok/s prefill |
 | Qwen3.8-Flash-Next 125B | GSQ-RCO IQ2_XS 68G | 1(+CPU 专家) | 俳句创作逐词数音节 | 9.0 tok/s 生成 / 15.8 tok/s prefill |
 
 > 支持的 27B 量化版本(unsloth/Qwen3.8-27B-GGUF 全家桶):`Q4_0 / Q4_1 / Q8_0 / UD-IQ1_M / UD-IQ1_S / UD-IQ2_XXS / UD-IQ2_S / UD-IQ3_XXS / UD-IQ3_S / UD-Q2_K_XL / UD-Q3_K_XL / UD-Q4_K_S / UD-Q4_K_M / UD-Q4_K_XL / UD-Q5_K_S / UD-Q5_K_M / UD-Q5_K_XL / UD-Q6_K / UD-Q6_K_L / UD-Q6_K_M / UD-Q6_K_XL / BF16`——
