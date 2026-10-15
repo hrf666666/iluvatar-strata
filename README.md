@@ -10,7 +10,7 @@
 <a href="docs/evidence/faithful-outputs.log">实测输出</a>
 </p>
 
-这是 [Strata](https://github.com/Niko1221/Strata) 和 [llama.cpp](https://github.com/ggml-org/llama.cpp) 在 **天数智芯 Iluvatar CoreX BI-V150** 上的完整移植。不需要 NVIDIA 或 AMD 的卡:Qwen3.8-Flash-Next 125B 在一张 32 GB 的 BI-V150 上聊天、写代码、数俳句音节;Qwen3.8-27B 全系量化和 GLM-5.3-Flash / GLM-5.3 开箱即用,输出忠实(每个模型的实测文本见 [docs/evidence/](docs/evidence/))。
+这是 [Strata](https://github.com/Niko1221/Strata) 和 [llama.cpp](https://github.com/ggml-org/llama.cpp) 在 **天数智芯 Iluvatar CoreX BI-V150** 上的完整移植。不需要 NVIDIA 或 AMD 的卡:Qwen3.8-Flash-Next 125B 在一张 32 GB 的 BI-V150 上聊天、写代码、数俳句音节;Qwen3.8-27B 全系量化和 GLM-5.3-Flash / GLM-5.3 开箱即用,输出忠实(每个模型的实测文本见 [docs/evidence/](docs/evidence/));**JEV-35B**(ModelScope 新发的 System 1 决策模型)一次前向就出决策,105 ms 一个。
 
 ## 有多快?
 
@@ -23,6 +23,7 @@
 | **Qwen3.8-Flash-Next 125B** | GSQ-RCO IQ2_XS(68 GB) | 9.0 tokens/s | 15.8 tokens/s |
 | GLM-5.3-Flash 320B | Q4_K(181 GB) | 7.5–8.2 tokens/s | 10–11 tokens/s |
 | **GLM-5.3 大杯** | UD-IQ1_M(228 GB) | 4.8–5.0 tokens/s | 8.6–9.8 tokens/s |
+| **JEV-35B 决策模型** | Q4_K_M(21.3 GB,单卡) | **105 ms 一个决策** | 不生成文本 |
 
 125B 和 320B 的模型比显存大:显卡装下常用部分,其余专家放内存和 CPU 里跑——这正是 Strata 的设计。
 
@@ -89,6 +90,28 @@ CUDA_VISIBLE_DEVICES=3 ./build-iluvatar/bin/llama-server \
 ```
 
 Strata 原生引擎(打包 + 生成)的完整用法见 [docs/ILUVATAR-PORT.md](docs/ILUVATAR-PORT.md#11-breakthrough-the-strata-engine-emits-faithful-text-2026-10-12)。
+
+## JEV-35B(ModelScope 新发布的 System 1 决策模型)
+
+[AutoTrust JEV-35B](https://huggingface.co/autotrust/JEV-35B) 把 Qwen3.5-35B-A3B 蒸馏成一个**纯决策模型**:不聊天、不生成文本,一次前向直接输出结构化决策——选择题(A–JU 最多 256 项)、是非题(true/false 带校准概率)、打分(0–5)。它的架构(`qwen35moe`)和合并进 lm_head 的决策头本仓库原生支持,从 HuggingFace safetensors 一路到天数单卡:
+
+```bash
+# 1. 下载模型(72 GB,hf-mirror.com 直连;decision_head.json 和 calibration.json 一并要)
+# 2. 转换 + 量化(lm_head 保持 bf16,决策读出需要精确的标签 logits)
+python3 convert_hf_to_gguf.py /path/to/JEV-35B --outfile JEV-35B-BF16.gguf --outtype bf16
+CUDA_VISIBLE_DEVICES=3 ./build-iluvatar/bin/llama-quantize \
+  --leave-output-tensor JEV-35B-BF16.gguf JEV-35B-Q4_K_M.gguf Q4_K_M   # -> 21.3 GB,单卡放得下
+
+# 3. 起服务 + 提问
+CUDA_VISIBLE_DEVICES=3 ./build-iluvatar/bin/llama-server -m JEV-35B-Q4_K_M.gguf -ngl 99 -c 4096 --port 8970 &
+python3 tools/jev_decide.py --model-dir /path/to/JEV-35B --port 8970 \
+  --kind choice --state "Customer message: my card was charged twice for the same order." \
+  --question "Which team should handle this ticket?" \
+  --options "billing" "shipping" "technical support" "account security"
+# -> answer A (billing), prob 1.000
+```
+
+实测 **11/11 全对**(choice 6 题含算术、noul 4 题、score 1 题),单决策热延迟 **105 ms**(模型卡 B200 参考值 204 ms)。`tools/jev_decide.py` 复刻官方 `serve_decide.py` 的读出协议(标签 logprob + bias ÷ 温度),支持 `--kind noul/score` 和 `--serve` 网关模式。证据:[docs/evidence/jev35b-decisions.log](docs/evidence/jev35b-decisions.log)。
 
 ## 出问题了?
 

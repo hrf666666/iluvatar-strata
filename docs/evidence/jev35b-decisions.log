@@ -1,0 +1,35 @@
+=== JEV-35B (AutoTrust System 1 decision model, Qwen3.5-35B-A3B MoE base) on Iluvatar BI-V150 — 2026-10-15 ===
+
+Pipeline: HF safetensors 72GB (14 shards, hf-mirror) -> convert_hf_to_gguf.py (arch qwen35moe,
+753 tensors, bf16 67GB) -> llama-quantize Q4_K_M --leave-output-tensor (21.3GB, lm_head bf16 for
+exact decision logits) -> llama-server -ngl 99 -c 4096 on ONE healthy BI-V150 (GPU 3).
+
+Read-out: tools/jev_decide.py replicates serve_decide.py System 1 protocol —
+  prompt = '[kind] K\n[state] S\n[question] Q\n[options]\nA) ..\n[decision]:'
+  p_i = softmax((logprob[label_i] + bias_i) / T_kind), T from calibration.json
+  labels: choice A..(256 slots), noul false/true, score 0..5
+
+Validation battery (temp of readout per calibration; all one forward pass):
+  [choice] capital of France 4-way            -> A Paris      p=1.000
+  [choice] sun rises in the                   -> A east       p=1.000
+  [choice] largest planet                     -> B Jupiter    p=1.000
+  [choice] 17+26 = ?                          -> B 43         p=0.939 (C 41: 0.061)
+  [choice] which is a programming language    -> B Python     p=1.000
+  [choice] 2 eggs x 3 cakes = ?               -> B 6          p=1.000
+  [noul]   Paris is the capital of France     -> true         p=1.000
+  [noul]   Eiffel Tower is in London          -> false        p=1.000
+  [noul]   Water boils at 100C at sea level   -> true         p=1.000
+  [noul]   Shakespeare wrote Pride&Prejudice  -> false        p=1.000
+  [score]  cold food + rude waiter satisfaction -> 0          p=1.000
+  [state demo] 'charged twice' ticket routing -> A billing    p=1.000 (model card's own example)
+  => 11/11 correct, all three decision kinds (choice/noul/score)
+
+Latency (warm, single forward pass): 105 ms per decision (B200 reference in model card: 204 ms median).
+First decision after idle ~240-550ms (prompt cache cold).
+
+Notes:
+- decision head is merged into lm_head rows ('merged': true in decision_head.json), so a plain
+  text completion exposes it; lm_head kept bf16 in the quantized GGUF for exact label logits.
+- llama.cpp logit_bias is a no-op in this CoreX build; the client reads top-64 full-vocab logprobs
+  instead ('logprobs': N integer form on /v1/completions) — labels outside top-64 are negligible.
+- noul/score prompts use the fixed option lines false/true and 0..5 (serve_decide.py defaults).

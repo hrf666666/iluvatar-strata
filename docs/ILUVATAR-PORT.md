@@ -303,3 +303,32 @@ np=64 with `-c 32768` (512/slot) fits in 30.1/32.7 GB.
 **18.2x** the 9.2 tok/s single-stream baseline. Launcher:
 `iluvatar-port/serve-parallel.sh`. Raw log:
 `docs/evidence/perf-optimization.log`.
+
+## 16. JEV-35B: decision model deployed end-to-end (2026-10-15)
+
+AutoTrust's JEV-35B (System 1 decision model on the Qwen3.5-35B-A3B MoE base,
+released on ModelScope/HF) went from HF safetensors to faithful single-card
+decisions on BI-V150:
+
+- **Conversion**: `architectures: Qwen3_5MoeForConditionalGeneration` maps to
+  the in-tree `Qwen3_5MoeTextModel` (arch `qwen35moe`, registered for exactly
+  this class). 753 tensors, bf16 GGUF 67 GB, no unknown-tensor errors.
+- **Quantization**: `llama-quantize --leave-output-tensor Q4_K_M` — the lm_head
+  (248320×2048, bf16) carries the merged decision head in the verbalizer token
+  rows (A..JU, false/true, 0..5 per `adapter_vllm/decision_head.json`), so it
+  stays unquantized for exact label logits. Result: 21.3 GB, one card.
+  Note: llama-quantize crashes enumerating wedged GPUs (CUDA_VISIBLE_DEVICES
+  must name a healthy card; empty string is ignored by this runtime).
+- **Read-out**: the model's own serve_decide.py expects vLLM's per-token-id
+  logprobs; llama.cpp has no such endpoint, and `logit_bias` turned out to be a
+  NO-OP in this CoreX build (verified: identical sampled tokens and reported
+  logprobs with and without bias). Working path: `/v1/completions` with
+  `"logprobs": N` in **integer** form returns full-vocab top-N logprobs
+  (pre-bias, exact); labels outside top-64 are negligible. `tools/jev_decide.py`
+  then applies `(logprob + bias) / T_kind` exactly like the reference.
+- **Prompt**: bare text `[kind] K\n[state] S\n[question] Q\n[options]\nA) ..\n
+  [decision]:` with fixed option lines for noul (false/true) and score (0..5) —
+  getting that wrong yields a uniform 0.5/0.5 (both labels fall out of top-N).
+- **Results**: 11/11 validation battery (choice incl. arithmetic, noul, score),
+  warm decision latency 105 ms on one BI-V150 (B200 reference: 204 ms median).
+  Raw log: `docs/evidence/jev35b-decisions.log`.
