@@ -924,7 +924,14 @@ const MmqPlan& mmq_plan() {
         MmqPlan p;
         const auto& lay = strata::kernels::cpu::expert_layout();
         const char* env = std::getenv("STRATA_PREFILL_MMQ");
+#if defined(STRATA_EXPERIMENTAL_SM60)
+        // iluvatar: the ggml-cuda MMQ objects build at -O0 on this toolchain (llc aborts at -O1), and an
+        // -O0 kernel that runs risks the XID-22 un-inlined-helper wedge (docs/ILUVATAR-PORT.md §1), so
+        // MMQ defaults OFF here; STRATA_PREFILL_MMQ=1 puts it back at the operator's own risk.
+        const bool on = mmq::built() && (env == nullptr ? false : std::atoi(env) != 0);
+#else
         const bool on = mmq::built() && (env == nullptr || std::atoi(env) != 0);
+#endif
         const int64_t layers = lay.native ? (int64_t) lay.fmt.size() : lay.n_layers;
         p.layer.assign((size_t) std::max<int64_t>(layers, 0), 0);
         p.fo.assign(p.layer.size(), 0);

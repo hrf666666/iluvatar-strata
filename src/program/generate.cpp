@@ -11858,6 +11858,21 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < T; ++i) std::fprintf(hashes, " %d", (int) outv[(size_t) i]);
                 std::fprintf(hashes, "\n");
             }
+            // --dump-logits on the verify-window path: a native pack never runs the token loop's
+            // writer, so the head's T rows are copied here instead (one raw row per window position)
+            if (dump != nullptr) {
+                std::vector<float> row((size_t) ver.vocab());
+                for (int i = 0; i < T; ++i) {
+                    if (!ver.copy_logits(i, row.data())) {
+                        std::fprintf(stderr, "strata generate: cannot read the window's logits for the dump\n");
+                        break;
+                    }
+                    if (std::fwrite(row.data(), sizeof(float), row.size(), dump) != row.size()) {
+                        std::fprintf(stderr, "strata generate: cannot write logits at window position %d\n", i);
+                        break;
+                    }
+                }
+            }
             if (!follow.empty()) {   // the continuation stands in for the argmax
                 const size_t k0 = produced.size();
                 for (int i = 0; i < T && k0 + (size_t) i < follow.size(); ++i) {

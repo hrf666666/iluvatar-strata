@@ -332,3 +332,52 @@ decisions on BI-V150:
 - **Results**: 11/11 validation battery (choice incl. arithmetic, noul, score),
   warm decision latency 105 ms on one BI-V150 (B200 reference: 204 ms median).
   Raw log: `docs/evidence/jev35b-decisions.log`.
+
+## 17. Fresh-pod rebuild, the sideload A/B, and card health (2026-10-16)
+
+The pod restarted between sessions (`/root` wiped; the ccache that had been masking an llc
+defect went with it). Rebuilding from a clean tree surfaced three things, and the external
+expert side-load experiment was completed end to end on a healthy card.
+
+**Fresh-build fixes (this commit).**
+
+* `ivcc` v3: the 11 ggml-cuda MMQ objects (`quantize.cu`, the 10 `mmq-instance-*.cu`) abort
+  `llc` — core dump in the "BI annotate control flow" pass — at `-O1` on this llc build. The
+  10-12 perf-pass builds had succeeded out of ccache; a fresh pod re-runs llc and dies. ivcc
+  now compiles everything under a `ggml-cuda` path at `-O0`. This is safe only because the
+  MMQ path never launches with the next change:
+* `STRATA_PREFILL_MMQ` defaults **OFF** under `STRATA_EXPERIMENTAL_SM60` (prefill.cpp): an
+  `-O0` kernel that runs risks the §1 XID-22 un-inlined-helper wedge (a wedged card is a
+  node-lifetime loss — three more cards went that way since §15, leaving only GPU 3 healthy).
+  The FP16 prefill fallback is bit-clean and plenty for verification work. Setting
+  `STRATA_PREFILL_MMQ=1` re-enables MMQ at the operator's own risk.
+* `--dump-logits` now writes one raw row per window position on the verify path (a native
+  pack never runs the token loop's writer, so the head's T rows are copied per round).
+
+**The side-load A/B (the task of the 10-15/16 sessions, now done).** The manifest of a pack
+copy points layers 44..47 at an external GGUF (`strata-external-experts.gguf`: per layer the
+two top-routed experts swapped + layer 40's top expert transplanted into layer 47's top
+slot; `dense.bin`/`index.txt`/tokenizer byte-identical to the baseline pack). Same command,
+same card, three runs of the 7-token prompt *"The theory of general relativity states that"*
+(`STRATA_VERIFY_T1=1 --expert-cache 1`):
+
+* baseline: *"gravity is the result of the curvature of spacetime caused by mass and
+  energy."* — 16/16 faithful tokens; a second baseline run drifts at window 12 (§11's
+  lifetime, hitting right at row 11 of the logits dump);
+* side-loaded: *"gravity is the result of the curvature of spacetime caused by **the
+  presence of mass**"* — identical tokens 1-12, divergence at 13;
+* per-row logits (248320 floats/row), rows 0..10 (the drift-free region): every float
+  differs, intervention ≈ **9-20x** the baseline-vs-baseline run-to-run noise (p50 0.50-0.72
+  vs 0.03-0.08). The intervention sits on the compute path and changes the computation,
+  while the engine still refuses geometry-inconsistent external packs (the 10-15 negative
+  test). Raw logs and numbers: `docs/evidence/sideload-ab.log`.
+
+**Card health.** Only GPU 3 responds now (GPU 7 flaky, 0/1/2/4/5/6 wedged at context
+creation — invisible to ixsmi, which shows all eight idle). `iluvatar-port/card-health.sh`
+(+ `ivcard-probe.cu`, a trivial vector-add) probes a card in 40 s; run it before and after
+every engine run. A `#267` on a healthy card wedges it for ~90 s and it RECOVERES once the
+engine process is fully dead — do not write a card off until a probe fails on a quiet host.
+The dead-output data point for §11/§12's T≥2 hunt: with the cache shrunk to one slot
+(~0 GPU-computed hits) the un-mitigated engine still dies after 4 tokens (was 1-2 at
+12896 slots), so the corruption is not proportional to the VRAM-hit work; the T=1 graph
+lifetime and the T≥2 first-replay NaN remain the open front.

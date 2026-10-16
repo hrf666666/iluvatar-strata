@@ -26,10 +26,20 @@ for a in "$@"; do
   esac
 done
 
+# v3 (2026-10-16): the ggml-cuda MMQ objects abort llc ("BI annotate control flow" pass,
+# core dump) at -O1 on this llc build; compile them at -O0. Safe: with STRATA_PREFILL_MMQ
+# defaulting OFF under STRATA_EXPERIMENTAL_SM60 (see prefill.cpp) these kernels never launch,
+# so the -O0 un-inlined-helper XID-22 hazard cannot fire.
+for a in "$@"; do
+  case "$a" in
+    *ggml-cuda*) OPT=-O0; break ;;
+  esac
+done
+OPT=${OPT:--O1}
 cmd=(nice -n 5 "$REAL" -std=c++17 -DGGML_CUDA_ARCH_NUM=710 \
      -include "$COMPAT" \
      --cuda-gpu-arch=ivcore11 --cuda-path=$COREX --no-cuda-version-check \
-     -I$COREX/include "${args[@]}" -O1)
+     -I$COREX/include "${args[@]}" ${OPT})
 
 if [ $has_c -eq 0 ]; then
   cmd+=(-L$COREX/lib64 -Wl,-rpath,$COREX/lib64 -L/usr/local/iluvatar/lib64 -Wl,-rpath,/usr/local/iluvatar/lib64 -lcudart -lcublas -lcurand -lcuda -lixthunk -lixml)
