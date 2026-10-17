@@ -380,3 +380,25 @@ Net: of the three headline gaps, **graph instantiation and streaming loads are s
 working** (every decode window replays through them), **clusters are hardware-gated and
 correctly compiled out**, and PDL is the one genuine loss — it would shave launch gaps in the
 decode chain but requires backend support that CoreX does not yet expose for ivcore11.
+
+## 20. Parity hygiene backlog: two toolchain artifacts and one real fix (2026-10-17, evening)
+
+The "three old wounds" from the 10-17 parity sweep, re-examined under the **canonical toolchain**
+(ivcc + `corex_compat.h` + `STRATA_CUDA_ARCH_NUM`) instead of the stale 10-16 rebuild:
+
+* `gr_parity` inject projection "pairwise duplicated" (11 cases) and
+  `elementwise_parity` `rms_norm_weighted` rel 1e-1 (half the elements wrong): **both
+  toolchain artifacts, already fixed by the existing compat layer** — the stale rebuild lacked
+  `STRATA_CUDA_ARCH_NUM`, so the compat header's `__shfl_*_sync` → `bi_shfl_*` width-32 rewrite
+  was inactive and the raw 3-arg shuffles ran at the bi hardware's default width 64 (an
+  off=16 butterfly then reads across the adjacent 32-lane group). Under the canonical flags:
+  `rms_norm_weighted` rel 3.9e-08, `gr_read/gr_write` 0 failures.
+* `quantize_act_parity` Q8_K denormal-corner tie (1 element, iscale≈4.4e8, product exactly
+  -37.5): **a real divergence, now fixed** — ggml's magic-add `nearest_int` relies on the f32
+  add `fval + 12582912.0f` rounding the .5 tie to even; the bi FADD rounds it away-from-even.
+  Verified on device: with the product exactly -37.5, the plain add yields 0xBFFFDA (= -38, RNE)
+  — and the failing element sat one ulp off that tie in the store loop, where the flip decided
+  the byte. `nearest_int_dev` now uses `__float2int_rn` (cvt.rni, verified RNE-correct on this
+  backend at ±37.5), which matches x86 SSE/ggml. `quantize_act_parity`: **0 failures over
+  5 Q8_0 + 4 Q8_K distributions**.
+* The embedding-gather FMA last-bit differences remain known-benign (#113).

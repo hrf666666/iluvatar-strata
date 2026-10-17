@@ -187,10 +187,10 @@ constexpr int Q8K_BYTES = 292;
 /// on exact ties - and that is the whole point of the constant, so a "cleaner" rewrite would silently change
 /// which way ties go.
 __device__ __forceinline__ int nearest_int_dev(float fval) {
-    const float val = fval + 12582912.0f;
-    int i;
-    memcpy(&i, &val, 4);
-    return (i & 0x007fffff) - 0x00400000;
+    // 10-17 tie debug: was ggml's magic-add (`fval + 12582912.0f` mantissa trick). On ivcore11 the
+    // add's .5 tie rounds away-from-even where x86 SSE rounds to even, flipping 1 element in 524288
+    // at iscale~4e8; __float2int_rn (cvt.rni) is verified RNE-correct on this backend.
+    return __float2int_rn(fval);
 }
 
 __global__ void quantize_q8_K_kernel(const float* __restrict__ x, uint8_t* __restrict__ blocks,
