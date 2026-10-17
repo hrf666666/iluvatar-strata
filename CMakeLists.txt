@@ -181,6 +181,12 @@ elseif(STRATA_ENABLE_CUDA)
       message(WARNING "Building for sm_${_base} (RTX 50) with CUDA ${CMAKE_CUDA_COMPILER_VERSION}: engines built with "
                       "CUDA 12.8 crashed on long prompts on these cards (issues #220, #224). Use CUDA 13.0 or newer.")
     endif()
+  # iluvatar port (ivcore11): a swap of the adaptive tier poisons the captured verify windows on
+  # the CoreX runtime (decode NaN, root-caused 2026-10-17 - see docs/ILUVATAR-PORT.md), so the
+  # port defaults the adaptive tier off unless the operator passes --adapt-every N explicitly
+  if(CMAKE_CUDA_ARCHITECTURES MATCHES "^ivcore")
+    set(STRATA_IVCORE_PORT 1)
+  endif()
   endforeach()
   if(STRATA_EXPERIMENTAL_SM60)
     # every target sees it: the Pascal / Volta code paths (the Volta prompt attention, PR #600) are compiled into this
@@ -547,6 +553,9 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   endif()
 
   add_executable(strata src/program/generate.cpp)
+  if(STRATA_IVCORE_PORT)
+    target_compile_definitions(strata PRIVATE STRATA_IVCORE_PORT=1)
+  endif()
   target_include_directories(strata PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(strata PRIVATE strata_engine strata_prefill strata_spec ${_strata_gpu_runtime_target})
 

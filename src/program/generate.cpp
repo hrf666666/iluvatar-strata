@@ -557,6 +557,7 @@ struct Options {
     /// Plan v0.3 P6: every `adapt_every` rounds, swap up to `adapt_swaps` of the most-routed missing experts into
     /// the VRAM tier in place of the least-routed resident ones (decayed counts).  0 = static residency.
     int adapt_every = 4;
+    bool adapt_every_set = false;   ///< the operator passed --adapt-every (an arch default then keeps hands off)
     float adapt_decay = 0.7f;   ///< the usage counts are multiplied by this after each adaptation (--adapt-decay)
     /// --adapt-async 1 (--serve with the resident RAM mode; opt-in): the adaptive tier's rounds advance between verify
     /// windows on a helper thread instead of one window waiting for a whole round (see the tier in the --serve block).
@@ -1800,7 +1801,7 @@ int main(int argc, char** argv) {
         else if (a == "--mtp") o.mtp = next("--mtp");
         else if (a == "--mtp-window") o.mtp_window = std::atoll(next("--mtp-window"));
         else if (a == "--pcie-frac") o.pcie_frac = std::atof(next("--pcie-frac"));
-        else if (a == "--adapt-every") o.adapt_every = std::atoi(next("--adapt-every"));
+        else if (a == "--adapt-every") { o.adapt_every = std::atoi(next("--adapt-every")); o.adapt_every_set = true; }
         else if (a == "--adapt-decay") o.adapt_decay = (float) std::atof(next("--adapt-decay"));
         else if (a == "--adapt-async") o.adapt_async = std::atoi(next("--adapt-async")) != 0 ? 1 : 0;
         else if (a == "--spec-min-p") o.spec_min_p = std::atof(next("--spec-min-p"));
@@ -1955,6 +1956,16 @@ int main(int argc, char** argv) {
         cudaDeviceProp ad{};
         if (cudaGetDeviceProperties(&ad, 0) == cudaSuccess) strata::core::apply_arch_defaults(ad.gcnArchName);
         else (void) cudaGetLastError();
+    }
+#endif
+#if defined(STRATA_IVCORE_PORT)
+    if (!o.adapt_every_set && o.adapt_every > 0) {
+        // An adaptive swap poisons the captured verify windows on this runtime: the first replay after a swap
+        // computes from torn residency/weights and every later logits row is NaN (the decode NaN, root-caused
+        // 2026-10-17; --adapt-every 0 was the fix that turned the unmitigated run faithful 16/16).  The tier
+        // therefore stays off unless the operator asks for it by name.
+        o.adapt_every = 0;
+        std::fprintf(stderr, "strata: ivcore port: the adaptive tier defaults to off (--adapt-every 0): a swap poisons the captured verify windows here; pass --adapt-every N to re-enable at your own risk\n");
     }
 #endif
     strata::core::set_coupled_draft(o.coupled_draft);

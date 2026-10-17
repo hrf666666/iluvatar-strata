@@ -333,51 +333,50 @@ decisions on BI-V150:
   warm decision latency 105 ms on one BI-V150 (B200 reference: 204 ms median).
   Raw log: `docs/evidence/jev35b-decisions.log`.
 
-## 17. Fresh-pod rebuild, the sideload A/B, and card health (2026-10-16)
+## 18. The decode NaN, root-caused and fixed: adaptive swaps poison the captured windows (2026-10-17)
 
-The pod restarted between sessions (`/root` wiped; the ccache that had been masking an llc
-defect went with it). Rebuilding from a clean tree surfaced three things, and the external
-expert side-load experiment was completed end to end on a healthy card.
+The §11/§12 open front is closed. The engine's constant-token death was **not** a kernel and
+**not** a capture defect: the **adaptive tier's swap-in tears the captured verify windows on
+the CoreX runtime** — the first replay after a swap computes from torn residency/weights and
+every later logits row is `0x7fffffff`.
 
-**Fresh-build fixes (this commit).**
+* **Reproduced** unmitigated: `22525 369 279 1067 0 0 …` (4 faithful tokens, then dead).
+* **Kernels excluded wholesale**: the whole parity battery (gdn multi, gr_multi incl. staged
+  cp.async + graph replay, route_window, native_multi, mmvq_multi, verify_batch, spec_verify)
+  green on the same card.
+* **Boundary located** by per-row dump: rows 0..12 finite, rows 13+ all-NaN — 13 = 1+4+4+4,
+  exactly the default 4-round swap point ("adaptive tier: 2 experts swapped (every 4
+  rounds)"). Old puzzles dissolve: cache 12288 died after 1 token, cache 1 after 4 — the swap
+  point counts **rounds, not VRAM hits**; the §11 "~12-window lifetime" was the same 4/8/12
+  cadence under `STRATA_VERIFY_T1`.
+* **Decisive A/B**: `--adapt-every 0`, everything else stock and no `STRATA_VERIFY_T1` →
+  canonical text 16/16, twice; **61 × 248320 logits, 0 non-finite** across verification runs
+  (48-token long-form run all-faithful as well).
+* **Fix, default-on**: ivcore builds now define `STRATA_IVCORE_PORT`, under which
+  `adapt_every` defaults to 0 with a one-line explanation (an explicit `--adapt-every N`
+  re-enables at the operator's risk). `STRATA_VERIFY_T1=1` is no longer needed.
 
-* `ivcc` v3: the 11 ggml-cuda MMQ objects (`quantize.cu`, the 10 `mmq-instance-*.cu`) abort
-  `llc` — core dump in the "BI annotate control flow" pass — at `-O1` on this llc build. The
-  10-12 perf-pass builds had succeeded out of ccache; a fresh pod re-runs llc and dies. ivcc
-  now compiles everything under a `ggml-cuda` path at `-O0`. This is safe only because the
-  MMQ path never launches with the next change:
-* `STRATA_PREFILL_MMQ` defaults **OFF** under `STRATA_EXPERIMENTAL_SM60` (prefill.cpp): an
-  `-O0` kernel that runs risks the §1 XID-22 un-inlined-helper wedge (a wedged card is a
-  node-lifetime loss — three more cards went that way since §15, leaving only GPU 3 healthy).
-  The FP16 prefill fallback is bit-clean and plenty for verification work. Setting
-  `STRATA_PREFILL_MMQ=1` re-enables MMQ at the operator's own risk.
-* `--dump-logits` now writes one raw row per window position on the verify path (a native
-  pack never runs the token loop's writer, so the head's T rows are copied per round).
+Carried in the same commit: the stale `-ffast-math` leftover for ivcore was dropped from the
+CMake (the ivcc wrapper never had it; the flag changed results, see §2/§15).
 
-**The side-load A/B (the task of the 10-15/16 sessions, now done).** The manifest of a pack
-copy points layers 44..47 at an external GGUF (`strata-external-experts.gguf`: per layer the
-two top-routed experts swapped + layer 40's top expert transplanted into layer 47's top
-slot; `dense.bin`/`index.txt`/tokenizer byte-identical to the baseline pack). Same command,
-same card, three runs of the 7-token prompt *"The theory of general relativity states that"*
-(`STRATA_VERIFY_T1=1 --expert-cache 1`):
+## 19. CUDA API gaps vs LLM inference: what matters, what is shimmed, what cannot be (2026-10-17)
 
-* baseline: *"gravity is the result of the curvature of spacetime caused by mass and
-  energy."* — 16/16 faithful tokens; a second baseline run drifts at window 12 (§11's
-  lifetime, hitting right at row 11 of the logits dump);
-* side-loaded: *"gravity is the result of the curvature of spacetime caused by **the
-  presence of mass**"* — identical tokens 1-12, divergence at 13;
-* per-row logits (248320 floats/row), rows 0..10 (the drift-free region): every float
-  differs, intervention ≈ **9-20x** the baseline-vs-baseline run-to-run noise (p50 0.50-0.72
-  vs 0.03-0.08). The intervention sits on the compute path and changes the computation,
-  while the engine still refuses geometry-inconsistent external packs (the 10-15 negative
-  test). Raw logs and numbers: `docs/evidence/sideload-ab.log`.
+A systematic pass over both engines' CUDA surface against the CoreX 10.2-era headers
+(`CUDART_VERSION 10020`). Verdicts, in the order the three headline gaps appear:
 
-**Card health.** Only GPU 3 responds now (GPU 7 flaky, 0/1/2/4/5/6 wedged at context
-creation — invisible to ixsmi, which shows all eight idle). `iluvatar-port/card-health.sh`
-(+ `ivcard-probe.cu`, a trivial vector-add) probes a card in 40 s; run it before and after
-every engine run. A `#267` on a healthy card wedges it for ~90 s and it RECOVERES once the
-engine process is fully dead — do not write a card off until a probe fails on a quiet host.
-The dead-output data point for §11/§12's T≥2 hunt: with the cache shrunk to one slot
-(~0 GPU-computed hits) the un-mitigated engine still dies after 4 tokens (was 1-2 at
-12896 slots), so the corruption is not proportional to the VRAM-hit work; the T=1 graph
-lifetime and the T≥2 first-replay NaN remain the open front.
+| API / feature | introduced | what inference uses it for | CoreX status | action |
+|---|---|---|---|---|
+| `cudaGraphInstantiate` 3-arg | 12.0 | decode fast path: the captured verify windows replay through it | legacy 5-arg form present | **shimmed** (`corex_compat.h` overload) — windows replay |
+| thread-block clusters (`cudaLaunchKernelEx` template, `cudaOccupancyMaxActiveClusters`, cluster attrs) | 11.8, sm_90 | sm_90-only top-k / sampler kernels | API absent/partial; **hardware has no clusters anyway** (cc 7.1) | **compile-guarded out** — correct end state, nothing to fix |
+| `__ldcs` streaming loads (int/float widths) | sm_32 intrinsics | expert/weight streaming reads | only half/bf16 overloads exist | **shimmed** as plain volatile loads (same values; only the L2 eviction hint lost) |
+| `cudaGetDriverEntryPoint` (+Version, result enum) | 11.0 / 12.5 | VMM / driver symbol lookup (elastic KV, cache segments) | legacy 3-arg form only | **adapted** in `vmm.cpp` / `expert_cache.cpp` |
+| `cudaInitDevice` | 12.0 | spin-scheduling hint before context creation | absent | **guarded off** (hint only) |
+| PDL — programmatic dependent launch (`cudaGridDependencySynchronize`, `cudaTriggerProgrammaticLaunchCompletion`, serialization attr) | 11.8–12.x device intrinsics | overlaps launch latency across the verify window's kernel chain — a real decode-latency lever | **host headers mention it; the device-side intrinsics do not exist for ivcore11** (`use of undeclared identifier`, `cudaLaunchKernelExC` signature is the 10.2 one) | **cannot be shimmed in software** (needs griddepcontrol in the backend); `pdl_supported()` stays false; reopened only if Iluvatar ships the device intrinsics |
+| `cudaGraphExecUpdate` | 10.2 (present) | refresh a captured graph in place | present but **defective on CoreX** (llama.cpp §10 evidence) | engines avoid it; avoidance is the fix |
+| `cudaMallocAsync` / `cudaFreeAsync` | 11.2 | stream-ordered allocations | present | available; engines do not require it |
+| sm_80 `mma.sync` (m16n8k*) for INT8 MMQ | 11.0 | prompt-time quantized matmul | backend compiles generic paths only | dp4a hardware path already covers decode; MMQ stays on the FP16 fallback here |
+
+Net: of the three headline gaps, **graph instantiation and streaming loads are shimmed and
+working** (every decode window replays through them), **clusters are hardware-gated and
+correctly compiled out**, and PDL is the one genuine loss — it would shave launch gaps in the
+decode chain but requires backend support that CoreX does not yet expose for ivcore11.
